@@ -26,6 +26,7 @@ export {
 
 export {createSyncTransportHost} from './transport-host.ts';
 export {acceptSyncTransport} from './transport-caller.ts';
+export {createSyncIframeRelay} from './iframe-relay.ts';
 
 export {
   CONTROL_SAB_BYTES,

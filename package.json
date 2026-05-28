@@ -32,7 +32,7 @@
     "sync"
   ],
   "scripts": {
-    "test": "vitest --exclude='.ignore/**'",
+    "test": "vitest --exclude='.ignore/**' --no-file-parallelism",
     "build": "tsdown",
     "typecheck": "tsc",
     "lint": "biome lint .",
