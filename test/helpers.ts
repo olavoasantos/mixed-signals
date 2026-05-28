@@ -50,10 +50,25 @@ export function createLinkedTransportPair(): {
       },
     },
     async flush() {
-      while (queue.length > 0) {
-        const pending = queue.splice(0);
-        for (const deliver of pending) {
-          await deliver();
+      // Drain microtasks AND the queue together until quiescent. The
+      // microtask flush is here so lazy `SyncablePromise` sends (which
+      // auto-fire one microtask after construction) get a chance to
+      // enqueue their wire message before we check `queue.length`.
+      // Two passes are needed for sends that chain through more than
+      // one microtask (e.g. transportReady.then → fire → enqueue).
+      const flushMicrotasks = () =>
+        new Promise<void>((r) => queueMicrotask(r));
+      let idle = 0;
+      while (idle < 2) {
+        await flushMicrotasks();
+        if (queue.length > 0) {
+          idle = 0;
+          const pending = queue.splice(0);
+          for (const deliver of pending) {
+            await deliver();
+          }
+        } else {
+          idle++;
         }
       }
     },
@@ -161,10 +176,21 @@ export function createLinkedRawTransportPair(): {
       },
     },
     async flush() {
-      while (queue.length > 0) {
-        const pending = queue.splice(0);
-        for (const deliver of pending) {
-          await deliver();
+      // See `createLinkedTransportPair.flush` for the microtask-drain
+      // rationale; same story for the raw path.
+      const flushMicrotasks = () =>
+        new Promise<void>((r) => queueMicrotask(r));
+      let idle = 0;
+      while (idle < 2) {
+        await flushMicrotasks();
+        if (queue.length > 0) {
+          idle = 0;
+          const pending = queue.splice(0);
+          for (const deliver of pending) {
+            await deliver();
+          }
+        } else {
+          idle++;
         }
       }
     },

@@ -4,6 +4,7 @@ import {
   UNWATCH_SIGNALS_METHOD,
   WATCH_SIGNALS_METHOD,
 } from '../shared/protocol.ts';
+import {SyncablePromise} from '../sync/syncable-promise.ts';
 import type {RPCClient} from './rpc.ts';
 
 /** @internal — retained for the optional context parameter to `RPCClient`. */
@@ -59,6 +60,22 @@ export class ClientReflection implements HydrateEnv {
 
   call(method: string, args: readonly unknown[]): Promise<any> {
     return this.rpc.call(method, args);
+  }
+
+  /**
+   * Lazy-send variant: returns a `SyncablePromise` that holds the call
+   * descriptor. The wire send fires on first consumption (`await`,
+   * `.then`, etc.) via `RPCClient#_sendCall`, OR is claimed by
+   * `rpc.wait(...)` for batched SAB delivery.
+   */
+  callSyncable(
+    method: string,
+    args: readonly unknown[],
+  ): SyncablePromise<any> {
+    const rpc = this.rpc;
+    return new SyncablePromise<any>({method, args}, (settle) => {
+      rpc._sendCall(method, args as unknown[], settle);
+    });
   }
 
   scheduleWatch(id: string): void {

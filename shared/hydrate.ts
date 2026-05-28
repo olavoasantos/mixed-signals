@@ -17,6 +17,18 @@ export interface HydrateEnv {
   /** Outgoing call (for method handles and function handles). */
   call(method: string, args: readonly unknown[]): Promise<any>;
   /**
+   * Like `call` but the wire send is deferred until the returned promise
+   * is consumed (by `await` / `.then` / `rpc.wait`). Implementations that
+   * don't support sync return a plain Promise; implementations with a
+   * sync transport return a `SyncablePromise` so it can be claimed by
+   * `rpc.wait(...)`.
+   *
+   * Used by the method-stub trap on object Proxies (line ~346). Bare
+   * function-handle calls (`createFunction`, line ~441) keep using `call`
+   * since they're invoked as plain callables.
+   */
+  callSyncable(method: string, args: readonly unknown[]): Promise<any>;
+  /**
    * Notify the owning peer we've released these handle ids. Batching is
    * handled inside the env implementation (debounced / coalesced).
    */
@@ -343,7 +355,7 @@ export class Hydrator {
         // is stable across multiple accesses.
         let m = methodCache.get(key);
         if (!m) {
-          m = (...args: unknown[]) => env.call(`${id}#${key}`, args);
+          m = (...args: unknown[]) => env.callSyncable(`${id}#${key}`, args);
           methodCache.set(key, m);
         }
         return m;

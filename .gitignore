@@ -2,3 +2,8 @@ node_modules/
 build/
 .typedoc/
 *.tsbuildinfo
+.ignore
+.product
+.DS_Store
+.AppleDouble
+.LSOverride

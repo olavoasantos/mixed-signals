@@ -50,9 +50,20 @@ function createLinkedTransports() {
       },
     } as Transport,
     async flush() {
-      while (queue.length > 0) {
-        const pending = queue.splice(0);
-        for (const d of pending) await d();
+      // Drain microtasks + queue together so lazy SyncablePromise sends
+      // (which auto-fire one microtask after construction) get caught.
+      const flushMicrotasks = () =>
+        new Promise<void>((r) => queueMicrotask(r));
+      let idle = 0;
+      while (idle < 2) {
+        await flushMicrotasks();
+        if (queue.length > 0) {
+          idle = 0;
+          const pending = queue.splice(0);
+          for (const d of pending) await d();
+        } else {
+          idle++;
+        }
       }
     },
   };
