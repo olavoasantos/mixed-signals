@@ -119,11 +119,11 @@ describe('sync RPC iframe (same-origin parent ↔ iframe-relay ↔ worker)', () 
    * passing test instead of a silent capability.
    *
    * Currently asserts the FAILURE behavior: a SAB posted from a COI
-   * parent to a cross-origin (different eTLD+1) COI iframe is silently
-   * dropped (the receiving `message` listener never fires for that
-   * specific payload, even though plain messages still flow).
+   * parent to a cross-origin (different eTLD+1) COI iframe fires a
+   * `messageerror` event on the iframe (the `message` event never
+   * fires for that specific payload). Plain messages still flow.
    */
-  it('cross-eTLD+1 SAB postMessage is silently dropped (spec: origin-keyed agent clusters)', async () => {
+  it('cross-eTLD+1 SAB postMessage fires messageerror (spec: origin-keyed agent clusters)', async () => {
     const {chromium} = await import('playwright');
     const xBrowser = await chromium.launch({
       args: [
@@ -168,6 +168,7 @@ describe('sync RPC iframe (same-origin parent ↔ iframe-relay ↔ worker)', () 
           headers,
           body: `<!DOCTYPE html><html><body><script>
             window.__received = [];
+            window.__messageErrors = 0;
             window.addEventListener('message', (e) => {
               window.__received.push({
                 kind: e.data?.kind,
@@ -177,6 +178,9 @@ describe('sync RPC iframe (same-origin parent ↔ iframe-relay ↔ worker)', () 
                 __probe__: 'iframe-received',
                 snapshot: window.__received,
               }, 'http://shop.test');
+            });
+            window.addEventListener('messageerror', () => {
+              window.__messageErrors += 1;
             });
           </script></body></html>`,
         });
@@ -223,6 +227,18 @@ describe('sync RPC iframe (same-origin parent ↔ iframe-relay ↔ worker)', () 
         iframeSnapshot,
         'iframe should have received the plain post but NOT the SAB post',
       ).toEqual([{kind: 'plain', hasSab: false}]);
+      const messageErrors = await page
+        .frames()
+        .find((f) => f.url() === 'http://ext.test/')
+        ?.evaluate(
+          () =>
+            (globalThis as unknown as {__messageErrors: number})
+              .__messageErrors,
+        );
+      expect(
+        messageErrors,
+        'iframe should fire `messageerror` for the rejected SAB payload',
+      ).toBeGreaterThan(0);
     } finally {
       await xBrowser.close();
     }
