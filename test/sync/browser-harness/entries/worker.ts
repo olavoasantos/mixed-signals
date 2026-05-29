@@ -9,6 +9,23 @@ import {RPCClient} from '../../../../client/rpc.ts';
 import type {RawTransport} from '../../../../shared/protocol.ts';
 import {acceptSyncTransport} from '../../../../sync/transport-caller.ts';
 
+// Tunneled-port trust hop (see iframe-tunneled-broker.test.ts).
+// If the iframe asks us to relay a MessagePort back to it — via
+// `{__type__: 'tunnel-init'}` carrying one port — immediately
+// re-transfer it. This establishes a port handle in the iframe whose
+// trust chain went through the worker. The worker itself doesn't keep
+// or use the port; it is a pure relay on the trust path. Outside the
+// tunneling test, no `tunnel-init` is ever sent, so this is a no-op.
+globalThis.addEventListener('message', (e) => {
+  const d = e.data as {__type__?: string} | undefined;
+  if (d?.__type__ !== 'tunnel-init') return;
+  const port = (e as MessageEvent).ports?.[0];
+  if (!port) return;
+  globalThis.postMessage({__type__: 'tunneled-port'}, [
+    port,
+  ] as unknown as never);
+});
+
 const base: RawTransport = {
   mode: 'raw',
   send(data, ctx) {
