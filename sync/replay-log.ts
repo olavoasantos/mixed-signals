@@ -148,6 +148,14 @@ export class ReplayLog {
   private static estimateSize(msg: WireMessage): number {
     // JSON.stringify is called on the idle (async) path, not the hot
     // sync dispatch path. The cost is acceptable for bookkeeping.
-    return ReplayLog.FRAME_OVERHEAD + JSON.stringify(msg).length * 2;
+    // Wrapped in try/catch because raw transports can carry values
+    // that JSON.stringify throws on (bigint, cyclic refs, etc.).
+    // A conservative fallback ensures the byte cap stays defensive.
+    try {
+      return ReplayLog.FRAME_OVERHEAD + JSON.stringify(msg).length * 2;
+    } catch {
+      // Conservative: assume 1 KiB for non-serializable frames.
+      return ReplayLog.FRAME_OVERHEAD + 1024;
+    }
   }
 }

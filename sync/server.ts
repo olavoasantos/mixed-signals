@@ -81,6 +81,14 @@ interface BatchContext {
    */
   aborted: boolean;
   /**
+   * True after the response timeline has been serialized. Once frozen,
+   * new notifications must route through the idle path (replay log)
+   * instead of being captured into batch.timeline — the bytes are
+   * already encoded and pushing into the array is a no-op. This
+   * separates the capture lifetime from the response-delivery lifetime.
+   */
+  timelineFrozen: boolean;
+  /**
    * Pending response chunks awaiting `pull` doorbells. Non-null
    * after `serviceSyncRequest` publishes the first chunk; nulled
    * after the final chunk is written.
@@ -241,11 +249,18 @@ export function enableSyncServer(
     abortActiveBatch();
     requestAccumulator = null;
 
-    // Initialize (or reset) drain-barrier state. A rehandshake resets
-    // the replay log and seq counters — the new connection starts from
-    // a clean slate.
-    replayLog = new ReplayLog();
-    serverOutSeq = 0;
+    // Initialize drain-barrier state on first handshake. On re-handshake
+    // with a reused SAB, preserve serverOutSeq so the monotonic invariant
+    // holds — rewinding would permanently disable the drain barrier
+    // because the worker's max-guard on CLIENT_APPLIED_SEQ refuses to
+    // lower its watermark.
+    if (replayLog === null) {
+      replayLog = new ReplayLog();
+      // serverOutSeq stays at 0 from initialization.
+    } else {
+      // Re-handshake: fresh log, but serverOutSeq continues monotonically.
+      replayLog = new ReplayLog();
+    }
     transport.send({
       __sync: 'hs-res',
       control,
@@ -258,6 +273,13 @@ export function enableSyncServer(
     activeBatch.aborted = true;
     activeBatch.resolve();
     activeBatch = null;
+    // Clear the SAB interception flag so post-abort frames route
+    // through the idle path. Must happen here (not in the post-await
+    // branch) to avoid a race where batch B sets the flag and then
+    // batch A's cleanup clobbers it back to 0.
+    if (controlView !== null) {
+      storeCtrl(controlView, CTRL.ACTIVE_SYNC_SEQ, 0);
+    }
   }
 
   // ── Doorbell (per-chunk request) ───────────────────────────────────────
@@ -365,17 +387,35 @@ export function enableSyncServer(
       done,
       resolve: resolveDone,
       aborted: false,
+      timelineFrozen: false,
       responseQueue: null,
     };
     activeBatch = batch;
 
-    // Pre-allocate every synth id BEFORE dispatching any call. The
-    // completion check `captured.size === expectedTotal` then uses
-    // a snapshot, not a growing set — if a future dispatch path
-    // ever fires `wrapper.send` synchronously within the dispatch
-    // loop, the comparison can't fire early on a partially-built
-    // batch. Today's `RPC.handleMessage` is async so the hazard
-    // is unreachable, but the defense is cheap.
+    // ── Snapshot replay frames BEFORE dispatch (design §4 step 6) ─────
+    // Frames emitted during dispatch must NOT appear in the replay
+    // slice — they route through the active-batch capture path instead.
+    // Snapshotting before dispatch ensures clean separation.
+    let replaySnapshot: WireMessage[] = [];
+    let replayedUpToSeq = serverOutSeq;
+    if (replayLog !== null) {
+      const {frames, gap} = replayLog.framesAfter(clientAppliedSeq);
+      if (gap) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[mixed-signals/sync] replay-log gap: clientAppliedSeq=${clientAppliedSeq}, ` +
+            `oldestSeq=${replayLog.oldestSeq()}, serverOutSeq=${serverOutSeq}. ` +
+            'Some frames were evicted before replay.',
+        );
+      }
+      replaySnapshot = frames.map((f) => f.msg);
+    }
+
+    // Publish ACTIVE_SYNC_SEQ so cross-context observers (future §6.2
+    // broker) can see the active-sync state on the SAB.
+    storeCtrl(controlView, CTRL.ACTIVE_SYNC_SEQ, seq);
+
+    // Pre-allocate every synth id BEFORE dispatching any call.
     const synthesizedCalls: WireMessage[] = [];
     for (const call of calls) {
       const synthId = nextSynthId++;
@@ -390,63 +430,42 @@ export function enableSyncServer(
     }
     const expectedTotal = batch.expected.size;
 
-    // Now dispatch. Re-stamp each call's id is already done above;
-    // we discard any id the caller-side envelope may carry — the
-    // host owns id assignment for synth calls so they cannot
-    // collide with the host RPC's own id space.
+    // Dispatch.
     for (const synthesized of synthesizedCalls) {
       rpcOnMessage?.(synthesized);
     }
 
-    // Empty batch: nothing to wait for. Resolve immediately so the
-    // response envelope contains an empty results array.
+    // Empty batch: nothing to wait for.
     if (expectedTotal === 0) {
       resolveDone();
     }
 
     await done;
 
-    // If we were aborted while suspended, the caller has moved on; do
-    // not publish a response into the SAB the new batch may already
-    // be writing to.
+    // If aborted while suspended, the caller has moved on.
+    // ACTIVE_SYNC_SEQ was already cleared by abortActiveBatch.
     if (batch.aborted) return;
 
-    // ── M002I006T: Compose response timeline ───────────────────────────
-    //
-    // The timeline is ordered: replayed frames (head) → side-effect
-    // notifications from dispatch → results in caller-input order.
-    //
-    // Replayed frames are idle-path frames the host sent that the
-    // worker hasn't applied yet (per clientAppliedSeq). Prepending
-    // them closes the stale-snapshot gap.
+    // ── Compose response timeline ──────────────────────────────────
+    // Order: replayed frames (snapshot) → side-effects → results.
     const timeline: WireMessage[] = [];
 
-    // 1. Replayed frames (head)
-    if (replayLog !== null) {
-      const {frames, gap} = replayLog.framesAfter(clientAppliedSeq);
-      if (gap) {
-        // Best-effort: some frames were evicted by the hard cap
-        // before the worker could apply them. Log a diagnostic.
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[mixed-signals/sync] replay-log gap: clientAppliedSeq=${clientAppliedSeq}, ` +
-            `oldestSeq=${replayLog.oldestSeq()}, serverOutSeq=${serverOutSeq}. ` +
-            'Some frames were evicted before replay.',
-        );
-      }
-      for (const {msg} of frames) {
+    // 1. Replayed frames from pre-dispatch snapshot. Only replay
+    //    notification frames — result/error frames from prior async
+    //    calls belong to a different call's lifecycle and must not
+    //    be mixed into this batch's positional result matching.
+    for (const msg of replaySnapshot) {
+      if (msg.type === 'notification') {
         timeline.push(msg);
       }
     }
 
-    // 2. Side-effect notifications captured during dispatch (@S, @P,
-    //    @E, etc.), in emission order.
+    // 2. Side-effect notifications captured during dispatch.
     for (const notif of batch.timeline) {
       timeline.push(notif);
     }
 
-    // 3. Results in caller-input order. Any synth id missing from
-    //    `captured` is a protocol bug; fill with a defensive error.
+    // 3. Results in caller-input order.
     for (const id of batch.orderedIds) {
       const captured = batch.captured.get(id);
       timeline.push(
@@ -458,12 +477,16 @@ export function enableSyncServer(
       );
     }
 
+    // Freeze the timeline: after this point, new notifications must
+    // route through the idle path, not batch.timeline.
+    batch.timelineFrozen = true;
+
     // Evict confirmed frames from the replay log.
     if (replayLog !== null) {
       replayLog.dropUpTo(clientAppliedSeq);
     }
 
-    const responseJson = JSON.stringify({seq, timeline});
+    const responseJson = JSON.stringify({seq, replayedUpToSeq, timeline});
     const encoded = new TextEncoder().encode(responseJson);
 
     // Publish RESPONSE_SEQ — informational. The caller's wake signal
@@ -529,10 +552,10 @@ export function enableSyncServer(
     Atomics.notify(controlView, CTRL.CHUNK_STATE);
 
     if (isLast) {
-      // Batch fully delivered. Release the slot so the next doorbell
-      // can install a fresh BatchContext; any post-publish notifications
-      // (signal updates emitted between sync calls, etc.) route normally
-      // via the async path.
+      // Batch fully delivered. Clear ACTIVE_SYNC_SEQ and release the
+      // slot so the next doorbell can install a fresh BatchContext;
+      // post-publish notifications route via the idle/async path.
+      storeCtrl(controlView, CTRL.ACTIVE_SYNC_SEQ, 0);
       activeBatch = null;
     } else {
       activeBatch.responseQueue = {
@@ -569,8 +592,12 @@ export function enableSyncServer(
           return;
         }
         // Side-effect notifications emitted during the active sync
-        // batch are captured into the timeline for M002I005T.
-        if (msg && msg.type === 'notification') {
+        // batch are captured into the timeline — but only while the
+        // timeline is still open for capture. Once frozen (after
+        // serialization), notifications must fall through to the
+        // idle path so they enter the replay log and ship via the
+        // next sync call.
+        if (msg && msg.type === 'notification' && !batch.timelineFrozen) {
           batch.timeline.push(msg);
           return;
         }
