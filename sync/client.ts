@@ -4,7 +4,30 @@ import type {
   WireMessage,
 } from '../shared/protocol.ts';
 import {SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
-import {CHUNK_STATE, CTRL, storeCtrl} from './lane.ts';
+import {CHUNK_STATE, CTRL, loadCtrl, storeCtrl} from './lane.ts';
+
+/**
+ * Idle-path frame envelope emitted by `enableSyncServer` (M002I002T).
+ * Distinguished from regular `WireMessage`s and other `SyncControl`
+ * frames by `__sync: 'frame'`.
+ *
+ * @internal
+ */
+interface SyncFrame {
+  __sync: 'frame';
+  seq: number;
+  msg: WireMessage;
+}
+
+function isSyncFrame(data: unknown): data is SyncFrame {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as {__sync?: unknown}).__sync === 'frame' &&
+    typeof (data as {seq?: unknown}).seq === 'number' &&
+    typeof (data as {msg?: unknown}).msg === 'object'
+  );
+}
 
 /**
  * Out-of-band sync-transport control frames carried over the base
@@ -138,8 +161,34 @@ export function enableSyncClient(
       handshakeResolve?.();
       return;
     }
-    // Non-handshake inbound: route live to the RPCClient if it has
-    // subscribed yet, otherwise buffer.
+
+    // M002I003T: unwrap idle-path frame envelopes. The host wraps
+    // every idle-path outbound frame as `{__sync: 'frame', seq, msg}`
+    // so the worker can checkpoint which frames it has applied.
+    if (isSyncFrame(msg)) {
+      const inner = msg.msg;
+      const seq = msg.seq;
+      // Deliver the inner WireMessage to the RPCClient.
+      if (rpcSubscriber) {
+        rpcSubscriber(inner, ctx);
+      } else {
+        pending.push({data: inner, ctx});
+      }
+      // Checkpoint AFTER delivery: any subsequent host read of
+      // CLIENT_APPLIED_SEQ is guaranteed to be ≥ the seq of frames
+      // the worker has finished applying.
+      if (controlView !== null) {
+        // Take max to avoid rewinding on out-of-order delivery.
+        const current = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
+        if (seq > current) {
+          storeCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ, seq);
+        }
+      }
+      return;
+    }
+
+    // Non-handshake, non-frame inbound: route live to the RPCClient
+    // if it has subscribed yet, otherwise buffer.
     if (rpcSubscriber) {
       rpcSubscriber(msg, ctx);
     } else {
@@ -181,7 +230,11 @@ export function enableSyncClient(
     }
 
     const seq = nextSeq++;
-    const envelope = {seq, calls};
+    // M002I004T: snapshot the caller's applied-seq watermark at
+    // envelope-build time. The host uses this to determine which
+    // replay-log frames to prepend to the response timeline.
+    const clientAppliedSeq = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
+    const envelope = {seq, clientAppliedSeq, calls};
     const requestJson = JSON.stringify(envelope);
     const encoded = new TextEncoder().encode(requestJson);
     const totalBytes = encoded.byteLength;
@@ -318,9 +371,13 @@ export function enableSyncClient(
     const responseJson = new TextDecoder().decode(responseAccumulator);
     const response = JSON.parse(responseJson) as {
       seq: number;
-      results: WireMessage[];
+      timeline?: WireMessage[];
+      results?: WireMessage[];
     };
-    return response.results;
+    // M002I005T: the response uses the unified `timeline` shape.
+    // Fall back to `results` for backward-compatibility with any
+    // stale test fixtures that haven't been updated yet.
+    return response.timeline ?? response.results ?? [];
   }
 
   const wrapper: RawTransport = {

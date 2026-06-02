@@ -347,9 +347,16 @@ function runWait(
   const responseJson = new TextDecoder().decode(responseAccumulator);
   const response = JSON.parse(responseJson) as {
     seq: number;
-    results: WireMessage[];
+    timeline?: WireMessage[];
+    results?: WireMessage[];
   };
-  return response.results;
+  // M002I005T: unified timeline format. Extract result/error frames
+  // positionally, dropping notification frames (which this low-level
+  // fixture doesn't process).
+  const all = response.timeline ?? response.results ?? [];
+  return all.filter(
+    (m) => m.type === 'result' || m.type === 'error',
+  );
 }
 
 // Signal readiness so the test driver can start dispatching commands.

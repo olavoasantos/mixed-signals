@@ -12,6 +12,7 @@ import {
   loadCtrl,
   storeCtrl,
 } from './lane.ts';
+import {ReplayLog} from './replay-log.ts';
 
 /**
  * Out-of-band sync-transport control frames carried over the base
@@ -28,7 +29,8 @@ type SyncControl =
       data: SharedArrayBuffer;
     }
   | {__sync: 'doorbell'; seq: number}
-  | {__sync: 'pull'; seq: number};
+  | {__sync: 'pull'; seq: number}
+  | {__sync: 'frame'; seq: number; msg: WireMessage};
 
 function isSyncControl(data: unknown): data is SyncControl {
   return (
@@ -63,6 +65,12 @@ interface BatchContext {
   expected: Set<number>;
   /** Captured `result` / `error` frames keyed by synth id. */
   captured: Map<number, WireMessage>;
+  /**
+   * Side-effect notification frames (`@S`, `@P`, `@E`, etc.) captured
+   * during the active sync batch, in emission order. These are interleaved
+   * with results in the response timeline (M002I005T).
+   */
+  timeline: WireMessage[];
   /** Resolves when `captured.size === expected.size` OR `aborted`. */
   done: Promise<void>;
   resolve: () => void;
@@ -173,6 +181,18 @@ export function enableSyncServer(
   // own id space is impossible.
   let nextSynthId = 1_000_000;
 
+  // ── Drain-barrier bookkeeping (M002) ──────────────────────────────────
+
+  // Per-client replay log. Instantiated at handshake time. Holds
+  // idle-path outbound frames for replay into the next sync call's
+  // response timeline.
+  let replayLog: ReplayLog | null = null;
+
+  // Monotonic host→client frame counter. Incremented on every idle-path
+  // outbound frame and published to `CTRL.SERVER_OUT_SEQ` so the caller
+  // can checkpoint what it has applied.
+  let serverOutSeq = 0;
+
   // ── Inbound dispatch ───────────────────────────────────────────────────
 
   transport.onMessage(async (msg, ctx) => {
@@ -220,6 +240,12 @@ export function enableSyncServer(
     // batch's closures become reclaimable.
     abortActiveBatch();
     requestAccumulator = null;
+
+    // Initialize (or reset) drain-barrier state. A rehandshake resets
+    // the replay log and seq counters — the new connection starts from
+    // a clean slate.
+    replayLog = new ReplayLog();
+    serverOutSeq = 0;
     transport.send({
       __sync: 'hs-res',
       control,
@@ -314,9 +340,14 @@ export function enableSyncServer(
     const requestJson = new TextDecoder().decode(fullPayload);
     const envelope = JSON.parse(requestJson) as {
       seq: number;
+      clientAppliedSeq?: number;
       calls: Array<{method: string; params?: unknown[]}>;
     };
     const calls = envelope.calls;
+
+    // M002I004T: read the caller's applied-seq watermark. Defaults to
+    // 0 for pre-M002 clients that don't send it yet.
+    const clientAppliedSeq = envelope.clientAppliedSeq ?? 0;
 
     // Build a fresh BatchContext for this batch. `done` resolves when
     // every expected response is captured OR when the batch is aborted
@@ -330,6 +361,7 @@ export function enableSyncServer(
       orderedIds: [],
       expected: new Set<number>(),
       captured: new Map<number, WireMessage>(),
+      timeline: [],
       done,
       resolve: resolveDone,
       aborted: false,
@@ -379,21 +411,59 @@ export function enableSyncServer(
     // be writing to.
     if (batch.aborted) return;
 
-    // Assemble the response timeline in caller-input order. Any synth
-    // id missing from `captured` is a protocol bug (RPC dispatched
-    // but never produced a `result`/`error`); fill with a defensive
-    // error frame rather than crash the wrapper.
-    const results: WireMessage[] = batch.orderedIds.map((id) => {
-      const captured = batch.captured.get(id);
-      if (captured) return captured;
-      return {
-        type: 'error',
-        id,
-        value: {message: `no response captured for synth id ${id}`},
-      };
-    });
+    // ── M002I006T: Compose response timeline ───────────────────────────
+    //
+    // The timeline is ordered: replayed frames (head) → side-effect
+    // notifications from dispatch → results in caller-input order.
+    //
+    // Replayed frames are idle-path frames the host sent that the
+    // worker hasn't applied yet (per clientAppliedSeq). Prepending
+    // them closes the stale-snapshot gap.
+    const timeline: WireMessage[] = [];
 
-    const responseJson = JSON.stringify({seq, results});
+    // 1. Replayed frames (head)
+    if (replayLog !== null) {
+      const {frames, gap} = replayLog.framesAfter(clientAppliedSeq);
+      if (gap) {
+        // Best-effort: some frames were evicted by the hard cap
+        // before the worker could apply them. Log a diagnostic.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[mixed-signals/sync] replay-log gap: clientAppliedSeq=${clientAppliedSeq}, ` +
+            `oldestSeq=${replayLog.oldestSeq()}, serverOutSeq=${serverOutSeq}. ` +
+            'Some frames were evicted before replay.',
+        );
+      }
+      for (const {msg} of frames) {
+        timeline.push(msg);
+      }
+    }
+
+    // 2. Side-effect notifications captured during dispatch (@S, @P,
+    //    @E, etc.), in emission order.
+    for (const notif of batch.timeline) {
+      timeline.push(notif);
+    }
+
+    // 3. Results in caller-input order. Any synth id missing from
+    //    `captured` is a protocol bug; fill with a defensive error.
+    for (const id of batch.orderedIds) {
+      const captured = batch.captured.get(id);
+      timeline.push(
+        captured ?? {
+          type: 'error',
+          id,
+          value: {message: `no response captured for synth id ${id}`},
+        },
+      );
+    }
+
+    // Evict confirmed frames from the replay log.
+    if (replayLog !== null) {
+      replayLog.dropUpTo(clientAppliedSeq);
+    }
+
+    const responseJson = JSON.stringify({seq, timeline});
     const encoded = new TextEncoder().encode(responseJson);
 
     // Publish RESPONSE_SEQ — informational. The caller's wake signal
@@ -477,10 +547,12 @@ export function enableSyncServer(
   const wrapper: RawTransport = {
     mode: 'raw',
     send(payload, ctx) {
-      // Intercept outbound `result` / `error` frames whose id matches
-      // an in-flight sync batch. Everything else (including
-      // `notification` frames + responses for async calls in flight)
-      // passes through to the base transport unchanged.
+      // Route outbound frames by sync state:
+      //   - Active sync batch: capture result/error for the batch; capture
+      //     notification side-effects into the timeline.
+      //   - Idle (no active batch): wrap in `{__sync: 'frame', seq, msg}`
+      //     envelope for drain-barrier bookkeeping, or pass through if
+      //     the handshake hasn't happened yet.
       const batch = activeBatch;
       if (batch !== null && !batch.aborted) {
         const msg = payload as WireMessage;
@@ -491,19 +563,44 @@ export function enableSyncServer(
           !batch.captured.has(msg.id)
         ) {
           batch.captured.set(msg.id, msg);
-          // Snapshot `expected.size` is captured at dispatch time as
-          // `expectedTotal` inside `serviceSyncRequest`; the live
-          // `batch.expected` is fully populated by then (the
-          // pre-allocate pass runs before any dispatch). Using
-          // `batch.expected.size` here is equivalent for M001 but
-          // structurally a snapshot would be safer if dispatch ever
-          // becomes interleaved with capture in a future milestone.
           if (batch.captured.size === batch.expected.size) {
             batch.resolve();
           }
           return;
         }
+        // Side-effect notifications emitted during the active sync
+        // batch are captured into the timeline for M002I005T.
+        if (msg && msg.type === 'notification') {
+          batch.timeline.push(msg);
+          return;
+        }
       }
+
+      // Idle-path emission: wrap outbound WireMessages with seq +
+      // log to the replay log. Non-WireMessage control frames (like
+      // hs-res) pass through unwrapped.
+      const msg = payload as WireMessage;
+      if (
+        controlView !== null &&
+        replayLog !== null &&
+        msg &&
+        typeof msg.type === 'string'
+      ) {
+        serverOutSeq++;
+        // Publish to SAB BEFORE the log push — the SAB is the
+        // authoritative source for serverOutSeq even if the log
+        // push fails.
+        storeCtrl(controlView, CTRL.SERVER_OUT_SEQ, serverOutSeq);
+        replayLog.push(serverOutSeq, msg);
+        const frame: SyncControl = {
+          __sync: 'frame',
+          seq: serverOutSeq,
+          msg,
+        };
+        transport.send(frame, ctx);
+        return;
+      }
+
       transport.send(payload, ctx);
     },
     onMessage(cb) {

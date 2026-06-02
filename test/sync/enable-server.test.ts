@@ -375,22 +375,14 @@ describe('enableSyncServer', () => {
     expect(sawRoot).toBe(true);
   });
 
-  it('notifications during the capture window pass through to the base (not captured)', async () => {
-    // The RPC pushes signal updates etc. via outbound notifications.
-    // Per design, notifications are NEVER captured by the sync window
-    // in M001 — only `result` / `error` frames matching the batch's
-    // synth ids are. The drain-barrier replay log (M002) will revisit
-    // this; for now we assert pass-through.
-    let triggerNotify: (() => void) | undefined;
+  it('notifications during the capture window are captured into the timeline (not forwarded to base)', async () => {
+    // M002: notifications emitted during an active sync batch are
+    // captured into the response timeline so the caller's reactive
+    // layer applies them synchronously before the result is observed.
+    // They should NOT appear on the base transport.
     h = setupHarness({
       ping() {
-        // Schedule a notification to fire during the dispatch window.
-        // We can't hit the precise window from inside this method
-        // without access to RPC internals, but issuing a notify here
-        // is enough to verify the routing path doesn't accidentally
-        // capture it.
         h?.rpc.notify('test-event', [{hello: 'world'}]);
-        triggerNotify?.();
         return 'pong';
       },
     });
@@ -419,9 +411,9 @@ describe('enableSyncServer', () => {
         (m as {type?: string}).type === 'notification' &&
         (m as {method?: string}).method === 'test-event',
     ).length;
-    // The notification should have been forwarded to the base
-    // transport rather than captured by the sync window.
-    expect(after - before).toBeGreaterThanOrEqual(1);
+    // The notification should have been captured into the timeline,
+    // NOT forwarded to the base transport.
+    expect(after - before).toBe(0);
   });
 
   it('async result of an in-flight non-sync call is NOT captured by the sync window', async () => {
@@ -469,14 +461,26 @@ describe('enableSyncServer', () => {
     await new Promise((r) => setTimeout(r, 100));
 
     // The slow call's `result` frame (id=1) must appear on the base —
-    // it's an async response, not part of the sync batch.
-    const sawAsyncResult = h.baseSent.some(
-      (m) =>
-        m !== null &&
-        typeof m === 'object' &&
+    // it's an async response, not part of the sync batch. With M002,
+    // idle-path frames are wrapped in `{__sync: 'frame', seq, msg}`.
+    const sawAsyncResult = h.baseSent.some((m) => {
+      if (m === null || typeof m !== 'object') return false;
+      // Direct result (pre-M002 or pre-handshake)
+      if (
         (m as {type?: string}).type === 'result' &&
-        (m as {id?: number}).id === 1,
-    );
+        (m as {id?: number}).id === 1
+      )
+        return true;
+      // Wrapped result (M002 idle-path)
+      const sync = m as {__sync?: string; msg?: {type?: string; id?: number}};
+      if (
+        sync.__sync === 'frame' &&
+        sync.msg?.type === 'result' &&
+        sync.msg?.id === 1
+      )
+        return true;
+      return false;
+    });
     expect(sawAsyncResult).toBe(true);
 
     // And it must NOT appear in the sync batch's results.
