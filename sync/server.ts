@@ -396,8 +396,11 @@ export function enableSyncServer(
     // Frames emitted during dispatch must NOT appear in the replay
     // slice — they route through the active-batch capture path instead.
     // Snapshotting before dispatch ensures clean separation.
-    let replaySnapshot: WireMessage[] = [];
-    let replayedUpToSeq = serverOutSeq;
+    let replaySnapshotWithSeqs: ReadonlyArray<{
+      seq: number;
+      msg: WireMessage;
+    }> = [];
+    let replayedUpToSeq = clientAppliedSeq;
     if (replayLog !== null) {
       const {frames, gap} = replayLog.framesAfter(clientAppliedSeq);
       if (gap) {
@@ -408,7 +411,7 @@ export function enableSyncServer(
             'Some frames were evicted before replay.',
         );
       }
-      replaySnapshot = frames.map((f) => f.msg);
+      replaySnapshotWithSeqs = frames;
     }
 
     // Publish ACTIVE_SYNC_SEQ so cross-context observers (future §6.2
@@ -454,11 +457,19 @@ export function enableSyncServer(
     //    notification frames — result/error frames from prior async
     //    calls belong to a different call's lifecycle and must not
     //    be mixed into this batch's positional result matching.
-    for (const msg of replaySnapshot) {
-      if (msg.type === 'notification') {
-        timeline.push(msg);
+    //    Track the highest replayed seq so the response watermark
+    //    only covers frames the worker will actually process.
+    let highestReplayedSeq = clientAppliedSeq;
+    for (let i = 0; i < replaySnapshotWithSeqs.length; i++) {
+      const entry = replaySnapshotWithSeqs[i]!;
+      if (entry.msg.type === 'notification') {
+        timeline.push(entry.msg);
+        if (entry.seq > highestReplayedSeq) {
+          highestReplayedSeq = entry.seq;
+        }
       }
     }
+    replayedUpToSeq = highestReplayedSeq;
 
     // 2. Side-effect notifications captured during dispatch.
     for (const notif of batch.timeline) {
