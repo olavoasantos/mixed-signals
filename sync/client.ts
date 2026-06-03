@@ -186,7 +186,8 @@ export function enableSyncClient(
                 'The SAB was copied across a cross-origin agent-cluster boundary ' +
                 'and lost its shared backing. ' +
                 'Ensure all documents in the chain share an origin and are ' +
-                'cross-origin-isolated, or use createIframeBrokerBridge.',
+                'cross-origin-isolated, or use createIframeBrokerBridge. ' +
+                'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
             ),
           );
         } else {
@@ -195,7 +196,8 @@ export function enableSyncClient(
               'enableSyncClient: hs-res carried malformed SAB fields ' +
                 `(control=${typeof msg.control}, data=${typeof msg.data}). ` +
                 'Verify the host wrapper allocated SharedArrayBuffers and that ' +
-                'the parent ↔ iframe boundary is same-origin.',
+                'the parent \u2194 iframe boundary is same-origin. ' +
+                'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
             ),
           );
         }
@@ -272,7 +274,8 @@ export function enableSyncClient(
     const timer = setTimeout(() => {
       reject(
         new SyncRPCTimeoutError(
-          `sync handshake timed out after ${timeoutMs} ms`,
+          `sync handshake timed out after ${timeoutMs} ms. ` +
+            'See docs/sync-mode.md#timeout for details.',
         ),
       );
     }, timeoutMs);
@@ -298,9 +301,8 @@ export function enableSyncClient(
       Atomics.wait(controlView, CTRL.LANE_VERSION, 0, 0);
     } catch {
       throw new SyncRPCUnsupportedContextError(
-        'rpc.wait() cannot be called from the Node main thread. ' +
-          'Atomics.wait is forbidden on the main thread. ' +
-          'Call rpc.wait() from a worker_threads Worker instead.',
+        'rpc.wait() cannot be called from the Node main thread. Atomics.wait is forbidden on the main thread \u2014 call rpc.wait() from a worker_threads Worker instead. ' +
+          'See docs/sync-mode.md#worker-context for details.',
       );
     }
 
@@ -348,7 +350,8 @@ export function enableSyncClient(
         'rpc.wait: sync call contains Transferable values but no sidecar ' +
           'channel was established during handshake. ' +
           'The base transport must propagate ctx.transfer in its send() ' +
-          'method for transferable support.',
+          'method for transferable support. ' +
+          'See docs/sync-mode.md#iframe-bridge-errors for details.',
       );
     }
 
@@ -422,7 +425,8 @@ export function enableSyncClient(
               : deadline - Date.now();
           if (deadline != null && remainingMs <= 0) {
             throw new SyncRPCTimeoutError(
-              `rpc.wait(seq=${seq}) timed out awaiting ACK_REQ at chunk ${chunkIndex} after ${waitOpts!.timeoutMs} ms`,
+              `rpc.wait(seq=${seq}) timed out awaiting ACK_REQ at chunk ${chunkIndex} after ${waitOpts!.timeoutMs} ms. ` +
+                'See docs/sync-mode.md#timeout for details.',
             );
           }
           const status = Atomics.wait(
@@ -433,7 +437,8 @@ export function enableSyncClient(
           );
           if (status === 'timed-out') {
             throw new SyncRPCTimeoutError(
-              `rpc.wait(seq=${seq}) timed out at chunk ${chunkIndex} (Atomics.wait status=timed-out)`,
+              `rpc.wait(seq=${seq}) timed out at chunk ${chunkIndex} (Atomics.wait status=timed-out). ` +
+                'See docs/sync-mode.md#timeout for details.',
             );
           }
           // 'ok' or 'not-equal' — re-read CHUNK_STATE and loop.
@@ -460,7 +465,7 @@ export function enableSyncClient(
           throw new SyncRPCError(
             `Failed to transfer ${typeName} (id=${t.id}) via sidecar: ${
               (err as Error).message
-            }`,
+            }. See docs/sync-mode.md#errors for details.`,
           );
         }
       }
@@ -500,7 +505,8 @@ export function enableSyncClient(
         deadline == null ? Number.POSITIVE_INFINITY : deadline - Date.now();
       if (deadline != null && remainingMs <= 0) {
         throw new SyncRPCTimeoutError(
-          `rpc.wait(seq=${seq}) timed out after ${waitOpts!.timeoutMs} ms (chunk ${chunkIndex})`,
+          `rpc.wait(seq=${seq}) timed out after ${waitOpts!.timeoutMs} ms (chunk ${chunkIndex}). ` +
+            'See docs/sync-mode.md#timeout for details.',
         );
       }
       const status = Atomics.wait(
@@ -511,7 +517,8 @@ export function enableSyncClient(
       );
       if (status === 'timed-out') {
         throw new SyncRPCTimeoutError(
-          `rpc.wait(seq=${seq}) timed out at chunk ${chunkIndex} (Atomics.wait status=timed-out)`,
+          `rpc.wait(seq=${seq}) timed out at chunk ${chunkIndex} (Atomics.wait status=timed-out). ` +
+            'See docs/sync-mode.md#timeout for details.',
         );
       }
       // 'ok' or 'not-equal' — re-read CHUNK_STATE and loop.
@@ -606,7 +613,8 @@ function decodeResponseTimeline(buf: Uint8Array): {
   const PREAMBLE_SIZE = 12;
   if (buf.byteLength < PREAMBLE_SIZE) {
     throw new SyncRPCError(
-      `decodeResponseTimeline: buffer too small (${buf.byteLength} bytes, need at least ${PREAMBLE_SIZE})`,
+      `decodeResponseTimeline: buffer too small (${buf.byteLength} bytes, need at least ${PREAMBLE_SIZE}). ` +
+        'See docs/sync-mode.md#errors for details.',
     );
   }
 
@@ -620,7 +628,8 @@ function decodeResponseTimeline(buf: Uint8Array): {
 
   if (count < 0) {
     throw new SyncRPCError(
-      `decodeResponseTimeline: negative record count ${count}. Possible wire protocol version mismatch.`,
+      `decodeResponseTimeline: negative record count ${count}. Possible wire protocol version mismatch. ` +
+        'See docs/sync-mode.md#errors for details.',
     );
   }
 
@@ -661,7 +670,8 @@ function decodeResponseTimeline(buf: Uint8Array): {
         if (header.bytes.length === 0) {
           throw new SyncRPCError(
             `decodeResponseTimeline: HANDLE_ID record at index ${i} missing kind byte. ` +
-              'Possible wire protocol version mismatch.',
+              'Possible wire protocol version mismatch. ' +
+              'See docs/sync-mode.md#errors for details.',
           );
         }
         const kind = String.fromCharCode(header.bytes[0]!);
@@ -685,7 +695,8 @@ function decodeResponseTimeline(buf: Uint8Array): {
       default:
         throw new SyncRPCError(
           `decodeResponseTimeline: unknown TYPE=${header.type} at record ${i} ` +
-            `(offset ${offset - header.totalSize}). Possible wire protocol version mismatch.`,
+            `(offset ${offset - header.totalSize}). Possible wire protocol version mismatch. ` +
+            'See docs/sync-mode.md#errors for details.',
         );
     }
   }
@@ -696,7 +707,8 @@ function decodeResponseTimeline(buf: Uint8Array): {
   if (offset !== local.byteLength) {
     throw new SyncRPCError(
       `decodeResponseTimeline: ${local.byteLength - offset} trailing bytes after ${count} records. ` +
-        'Possible wire protocol version mismatch.',
+        'Possible wire protocol version mismatch. ' +
+        'See docs/sync-mode.md#errors for details.',
     );
   }
 

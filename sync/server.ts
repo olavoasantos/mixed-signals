@@ -904,7 +904,8 @@ export function enableSyncServer(
           const err = new SyncRPCResponseTransferableError(
             'Response-side Transferable values are not yet supported in sync RPC. ' +
               'This is a planned capability (deferred to a future milestone). ' +
-              `Found: ${found.type} at ${found.path}.`,
+              `Found: ${found.type} at ${found.path}. ` +
+              'See docs/sync-mode.md#response-transferable for details.',
           );
           frame = {
             type: 'error',
@@ -1040,9 +1041,10 @@ export function enableSyncServer(
         if (msg && msg.type === 'call') {
           throw new SyncRPCReentrancyError(
             'A method dispatched during a sync call tried to invoke a function on the ' +
-            'sync-blocked client. This would deadlock — the client is in Atomics.wait ' +
+            'sync-blocked client. This would deadlock \u2014 the client is in Atomics.wait ' +
             'and cannot process inbound calls. Restructure the host method to avoid ' +
-            'calling back into the sync-blocked client during dispatch.',
+            'calling back into the sync-blocked client during dispatch. ' +
+            'See docs/sync-mode.md#reentrancy for details.',
           );
         }
         if (

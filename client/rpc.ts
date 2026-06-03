@@ -98,9 +98,8 @@ function detectUnsupportedContext(): {
       return {
         kind: 'not-coi',
         message:
-          'rpc.wait() requires cross-origin isolation. ' +
-          'Configure COOP `same-origin` + COEP `require-corp` on every ' +
-          'context in the chain (page, iframe, worker).',
+          'rpc.wait() requires cross-origin isolation. Configure COOP `same-origin` + COEP `require-corp` on every context in the chain (page, iframe, worker). ' +
+          'See docs/sync-mode.md#cross-origin-isolation for setup steps.',
       };
     }
     // Browser worker with COI: SAB + Atomics should be available.
@@ -115,9 +114,8 @@ function detectUnsupportedContext(): {
     return {
       kind: 'no-sab',
       message:
-        'rpc.wait() requires SharedArrayBuffer and Atomics. ' +
-        'Enable cross-origin isolation (COOP + COEP headers) or ' +
-        'use a runtime that supports SharedArrayBuffer.',
+        'rpc.wait() requires SharedArrayBuffer and Atomics. Enable cross-origin isolation (COOP + COEP headers) or use a runtime that supports SharedArrayBuffer. ' +
+        'See docs/sync-mode.md#worker-context for details.',
     };
   }
 
@@ -126,9 +124,8 @@ function detectUnsupportedContext(): {
     return {
       kind: 'main-thread',
       message:
-        'rpc.wait() cannot be called from the browser main thread. ' +
-        'Atomics.wait is forbidden on the main thread. ' +
-        'Call rpc.wait() from a DedicatedWorker or SharedWorker instead.',
+        'rpc.wait() cannot be called from the browser main thread. Atomics.wait is forbidden on the main thread — call rpc.wait() from a DedicatedWorker or SharedWorker instead. ' +
+        'See docs/sync-mode.md#worker-context for details.',
     };
   }
 
@@ -137,9 +134,8 @@ function detectUnsupportedContext(): {
     return {
       kind: 'service-worker',
       message:
-        'rpc.wait() cannot be called from a ServiceWorker. ' +
-        'ServiceWorkers cannot use Atomics.wait. ' +
-        'Call rpc.wait() from a DedicatedWorker or SharedWorker instead.',
+        'rpc.wait() cannot be called from a ServiceWorker. ServiceWorkers cannot use Atomics.wait — call rpc.wait() from a DedicatedWorker or SharedWorker instead. ' +
+        'See docs/sync-mode.md#worker-context for details.',
     };
   }
 
@@ -366,8 +362,8 @@ export class RPCClient {
   } {
     if (typeof this.transport.wait !== 'function') {
       throw new SyncRPCNoTransportWaitError(
-        'rpc.wait(): transport does not implement wait(). Configure the ' +
-          'client with a sync-capable transport (see mixed-signals/sync).',
+        'rpc.wait() requires a sync-capable transport. Configure the client with enableSyncClient (mixed-signals/sync). ' +
+          'See docs/sync-mode.md#no-transport-wait for setup steps.',
       );
     }
     // Gate checks 2 + 3: COI and unsupported-context detection.
@@ -399,16 +395,14 @@ export class RPCClient {
       const state = peekSyncableState(p);
       if (state === null) {
         throw new SyncRPCAlreadyWaitedError(
-          'rpc.wait(): each argument must be a SyncablePromise from ' +
-            "this client's proxy (e.g. rpc.root.foo()); received a " +
-            'plain Promise or other value.',
+          'rpc.wait() requires SyncablePromise values from this client\'s proxy (e.g. rpc.root.foo()). Received a plain Promise or other value. ' +
+            'See docs/sync-mode.md#already-waited for details.',
         );
       }
       if (state.consumed) {
         throw new SyncRPCAlreadyWaitedError(
-          `rpc.wait(): SyncablePromise already consumed by '${
-            state.consumer ?? 'unknown path'
-          }'.`,
+          `SyncablePromise already consumed by '${state.consumer ?? 'unknown'}'. Each promise can only be consumed once \u2014 by await, .then, or rpc.wait. ` +
+            'See docs/sync-mode.md#already-waited for details.',
         );
       }
     }

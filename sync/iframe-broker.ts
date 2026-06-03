@@ -137,7 +137,8 @@ export function _createIframeBrokerBridgeInternal(opts: {
     throw new SyncRPCIframeBridgeError(
       'createIframeBrokerBridge: this context is not crossOriginIsolated. ' +
         'Configure COOP `same-origin` + COEP `require-corp` on every ' +
-        'document in the chain (parent page, iframe, worker source).',
+        'document in the chain (parent page, iframe, worker source). ' +
+        'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
     );
   }
 

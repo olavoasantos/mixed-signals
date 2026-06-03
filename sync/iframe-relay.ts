@@ -151,7 +151,8 @@ export function _createIframeRelayBridgeInternal(opts: {
     throw new SyncRPCIframeBridgeError(
       'createIframeRelayBridge: parentOrigin is "null" (opaque). ' +
         'Sandboxed iframes without allow-same-origin cannot relay SABs. ' +
-        'Use createIframeBrokerBridge for cross-origin / opaque-origin chains.',
+        'Use createIframeBrokerBridge for cross-origin / opaque-origin chains. ' +
+        'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
     );
   }
 
@@ -172,19 +173,22 @@ export function _createIframeRelayBridgeInternal(opts: {
   if (!localWindow || typeof localWindow.addEventListener !== 'function') {
     throw new SyncRPCIframeBridgeError(
       'createIframeRelayBridge: no usable window.addEventListener. ' +
-        'This helper must run inside a browser iframe.',
+        'This helper must run inside a browser iframe. ' +
+        'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
     );
   }
   if (!parentWindow || typeof parentWindow.postMessage !== 'function') {
     throw new SyncRPCIframeBridgeError(
       'createIframeRelayBridge: no usable window.parent.postMessage. ' +
-        'This helper must run inside a browser iframe.',
+        'This helper must run inside a browser iframe. ' +
+        'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
     );
   }
   if (parentWindow === localWindow) {
     throw new SyncRPCIframeBridgeError(
       'createIframeRelayBridge: window.parent === window. The relay ' +
-        'must run inside an iframe, not in the top-level window.',
+        'must run inside an iframe, not in the top-level window. ' +
+        'See docs/sync-mode.md#iframe-bridge-errors for setup checklist.',
     );
   }
 
