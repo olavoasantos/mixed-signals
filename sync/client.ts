@@ -46,9 +46,14 @@ type SyncControl =
   | {__sync: 'doorbell'; seq: number}
   | {__sync: 'pull'; seq: number};
 
-function isHandshakeRes(
-  data: unknown,
-): data is Extract<SyncControl, {__sync: 'hs-res'}> {
+interface HandshakeRes {
+  __sync: 'hs-res';
+  control: SharedArrayBuffer;
+  data: SharedArrayBuffer;
+  epoch?: number;
+}
+
+function isHandshakeRes(data: unknown): data is HandshakeRes {
   return (
     typeof data === 'object' &&
     data !== null &&

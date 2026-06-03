@@ -27,10 +27,12 @@ type SyncControl =
       __sync: 'hs-res';
       control: SharedArrayBuffer;
       data: SharedArrayBuffer;
+      epoch: number;
     }
   | {__sync: 'doorbell'; seq: number}
   | {__sync: 'pull'; seq: number}
-  | {__sync: 'frame'; seq: number; msg: WireMessage};
+  | {__sync: 'frame'; seq: number; msg: WireMessage}
+  | {__sync: 'client_dead'; epoch: number; clientId: string};
 
 function isSyncControl(data: unknown): data is SyncControl {
   return (
@@ -157,9 +159,28 @@ interface BatchContext {
  */
 export function enableSyncServer(
   transport: RawTransport,
-  opts?: {dataSabSize?: number},
+  opts?: {
+    dataSabSize?: number;
+    /**
+     * Stable client identifier for this lane. When provided, the
+     * host-side CALLER_STATE poll can invoke `onClientDead` even
+     * before the postMessage notification arrives. If omitted, the
+     * SAB poll path silently drops the notification (the postMessage
+     * path still works via the envelope's `clientId` field).
+     */
+    clientId?: string;
+    /**
+     * Called when a worker dies mid-call. Wire this to
+     * `rpc.removeClient(clientId)` to release per-client handles.
+     * The wrapper never holds an upward reference to the RPC
+     * instance; this callback is the decoupling seam.
+     */
+    onClientDead?: (clientId: string) => void;
+  },
 ): RawTransport {
   const dataSabSize = opts?.dataSabSize ?? DEFAULT_DATA_SAB_BYTES;
+  const configuredClientId = opts?.clientId;
+  const onClientDead = opts?.onClientDead;
 
   // SAB pair + views. Allocated lazily on first `hs-req`; reused on
   // subsequent re-handshakes (see jsdoc above).
@@ -189,6 +210,21 @@ export function enableSyncServer(
   // own id space is impossible.
   let nextSynthId = 1_000_000;
 
+  // ── Epoch tracking (M003I007T) ──────────────────────────────────────
+
+  // Monotonic epoch counter. Incremented on each handshake; returned
+  // in `hs-res` and validated on incoming `client_dead` notifications.
+  // Epoch 0 is reserved for pre-handshake deaths (always rejected).
+  let nextEpoch = 1;
+  let currentEpoch = 0;
+
+  // ── Client-dead dedup (M003I006T) ─────────────────────────────────────
+
+  // Set of clientIds already processed for death. Prevents duplicate
+  // `onClientDead` invocations when both the SAB poll and the
+  // postMessage notification fire for the same worker.
+  const deadClients = new Set<string>();
+
   // ── Drain-barrier bookkeeping (M002) ──────────────────────────────────
 
   // Per-client replay log. Instantiated at handshake time. Holds
@@ -215,6 +251,10 @@ export function enableSyncServer(
       }
       if (msg.__sync === 'pull') {
         writeNextResponseChunk(msg.seq);
+        return;
+      }
+      if (msg.__sync === 'client_dead') {
+        handleClientDead(msg);
         return;
       }
       return; // unknown sync-control type — ignore
@@ -249,6 +289,12 @@ export function enableSyncServer(
     abortActiveBatch();
     requestAccumulator = null;
 
+    // Allocate a fresh epoch for this handshake. The epoch is
+    // monotonic per wrapper instance; a stale `client_dead` from
+    // a prior bridge (HMR recycle) carries the old epoch and is
+    // rejected by `handleClientDead`.
+    currentEpoch = nextEpoch++;
+
     // Initialize drain-barrier state on first handshake. On re-handshake
     // with a reused SAB, preserve serverOutSeq so the monotonic invariant
     // holds — rewinding would permanently disable the drain barrier
@@ -265,7 +311,56 @@ export function enableSyncServer(
       __sync: 'hs-res',
       control,
       data,
+      epoch: currentEpoch,
     } satisfies SyncControl);
+  }
+
+  // ── Client-dead handler (M003I006T) ──────────────────────────────────
+
+  function handleClientDead(msg: {epoch: number; clientId: string}): void {
+    const {epoch, clientId} = msg;
+    // Reject malformed clientId.
+    if (!clientId || typeof clientId !== 'string') return;
+    // Reject pre-handshake deaths (epoch 0) — no lane state to clean.
+    if (epoch === 0) return;
+    // Reject stale epoch (HMR: old bridge's notification after new
+    // bridge handshaked). Only the current epoch is valid.
+    if (epoch !== currentEpoch) return;
+    // Dedup: both the SAB poll (M003I005T) and the postMessage
+    // notification can fire for the same worker.
+    if (deadClients.has(clientId)) return;
+    deadClients.add(clientId);
+    // Abort any in-flight batch for this worker.
+    abortActiveBatch();
+    // Invoke user callback (typically wired to rpc.removeClient).
+    if (onClientDead) {
+      try {
+        onClientDead(clientId);
+      } catch {
+        // User callback threw — swallow. The teardown is
+        // best-effort from the wrapper's perspective.
+      }
+    }
+  }
+
+  /**
+   * Notify client death from the SAB poll path (M003I005T). Uses
+   * the same dedup set as `handleClientDead` so only one
+   * `onClientDead` fires per worker.
+   *
+   * @internal
+   */
+  function notifyClientDeadFromPoll(clientId: string): void {
+    if (!clientId || deadClients.has(clientId)) return;
+    deadClients.add(clientId);
+    abortActiveBatch();
+    if (onClientDead) {
+      try {
+        onClientDead(clientId);
+      } catch {
+        // swallow
+      }
+    }
   }
 
   function abortActiveBatch(): void {
@@ -536,6 +631,16 @@ export function enableSyncServer(
       activeBatch === null ||
       activeBatch.responseQueue === null
     ) {
+      return;
+    }
+    // ── CALLER_STATE poll (M003I005T) ─────────────────────────────────
+    // Before writing each response chunk, check whether the caller is
+    // dead. Cost: ~3-5 ns per chunk (one Atomics.load). If dead, abort
+    // the response — nobody will read it.
+    if (loadCtrl(controlView, CTRL.CALLER_STATE) === CALLER_STATE.DEAD) {
+      if (configuredClientId) {
+        notifyClientDeadFromPoll(configuredClientId);
+      }
       return;
     }
     // Gate by seq when a pull-driven call supplies one. If the pull
