@@ -259,7 +259,7 @@ export function enableSyncClient(
 
   function wait(
     calls: WireMessage[],
-    waitOpts?: {timeoutMs?: number; prelude?: WireMessage[]},
+    waitOpts?: {timeoutMs?: number; flushPrelude?: () => WireMessage[]},
   ): WireMessage[] {
     if (waitOpts?.timeoutMs != null) {
       const t = waitOpts.timeoutMs;
@@ -309,9 +309,12 @@ export function enableSyncClient(
       );
     }
 
-    // Include the prelude in the envelope so the host applies
-    // pending @W / @U / @D notifications before dispatching calls.
-    const prelude = waitOpts?.prelude ?? [];
+    // Flush the prelude AFTER all synchronous validation has passed
+    // (timeoutMs, sidecar check above). This is the transactional
+    // commit point: if validation threw, the batches haven't been
+    // drained and their debounce timers are intact. From here on,
+    // the prelude is committed and will reach the host.
+    const prelude = waitOpts?.flushPrelude?.() ?? [];
     const envelope = {seq, clientAppliedSeq, prelude, calls: finalCalls};
     const requestJson = JSON.stringify(envelope);
     const encoded = new TextEncoder().encode(requestJson);
@@ -572,6 +575,12 @@ function decodeResponseTimeline(buf: Uint8Array): {
   const replayedUpToSeq = preambleView.getInt32(4, true);
   const count = preambleView.getInt32(8, true);
 
+  if (count < 0) {
+    throw new SyncRPCError(
+      `decodeResponseTimeline: negative record count ${count}. Possible wire protocol version mismatch.`,
+    );
+  }
+
   if (count === 0) {
     return {seq, replayedUpToSeq, timeline: []};
   }
@@ -606,8 +615,13 @@ function decodeResponseTimeline(buf: Uint8Array): {
 
       case WIRE_TYPE.HANDLE_ID: {
         // Kind prefix byte is in payload (LEN=1); numeric id in INLINE_VAL.
-        const kindCode = header.bytes.length > 0 ? header.bytes[0]! : 111; // 'o'
-        const kind = String.fromCharCode(kindCode);
+        if (header.bytes.length === 0) {
+          throw new SyncRPCError(
+            `decodeResponseTimeline: HANDLE_ID record at index ${i} missing kind byte. ` +
+              'Possible wire protocol version mismatch.',
+          );
+        }
+        const kind = String.fromCharCode(header.bytes[0]!);
         const marker = `${kind}${header.inlineVal}`;
         timeline.push({
           type: 'result',
@@ -631,6 +645,16 @@ function decodeResponseTimeline(buf: Uint8Array): {
             `(offset ${offset - header.totalSize}). Possible wire protocol version mismatch.`,
         );
     }
+  }
+
+  // Defensive: verify all bytes were consumed. Trailing junk
+  // indicates a wire-format mismatch (e.g., version skew or
+  // corrupted buffer).
+  if (offset !== local.byteLength) {
+    throw new SyncRPCError(
+      `decodeResponseTimeline: ${local.byteLength - offset} trailing bytes after ${count} records. ` +
+        'Possible wire protocol version mismatch.',
+    );
   }
 
   return {seq, replayedUpToSeq, timeline};

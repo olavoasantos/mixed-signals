@@ -669,11 +669,26 @@ export function enableSyncServer(
     // is what makes "subscribe then immediately read" work.
     if (envelope.prelude && envelope.prelude.length > 0) {
       for (const entry of envelope.prelude) {
+        // Only notification frames are valid prelude entries — the
+        // prelude carries @W / @U / @D, never calls or results.
+        // A buggy or HMR-skewed client sending other types is
+        // silently dropped to prevent out-of-band call injection.
+        if (!entry || (entry as WireMessage).type !== 'notification') {
+          continue;
+        }
         try {
-          rpcOnMessage?.(entry);
+          const ret = rpcOnMessage?.(entry);
+          // Catch async rejections — the handler returns
+          // void | Promise<void>; an awaited handler that throws
+          // becomes a rejected promise that escapes the try/catch.
+          if (ret && typeof (ret as Promise<unknown>).catch === 'function') {
+            (ret as Promise<unknown>).catch(() => {
+              // Non-fatal: swallow to match documented contract.
+            });
+          }
         } catch (_) {
-          // Prelude entry processing failure is non-fatal — log and
-          // continue with remaining entries + batch dispatch.
+          // Prelude entry processing failure is non-fatal — continue
+          // with remaining entries + batch dispatch.
         }
       }
     }

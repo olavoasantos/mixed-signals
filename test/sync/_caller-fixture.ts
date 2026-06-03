@@ -371,8 +371,10 @@ function runWait(
         all.push({type: 'result', id: 0, value: header.inlineVal});
         break;
       case WIRE_TYPE.HANDLE_ID: {
-        const kindCode = header.bytes.length > 0 ? header.bytes[0]! : 111;
-        const kind = String.fromCharCode(kindCode);
+        if (header.bytes.length === 0) {
+          throw new Error('HANDLE_ID record missing kind byte — wire protocol mismatch');
+        }
+        const kind = String.fromCharCode(header.bytes[0]!);
         const marker = `${kind}${header.inlineVal}`;
         all.push({type: 'result', id: 0, value: {[HANDLE_MARKER]: marker}});
         break;

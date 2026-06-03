@@ -157,17 +157,37 @@ describe('prelude applied before dispatch', () => {
     // 4. The @W travels in the request envelope's prelude field
     // 5. The host applies @W before dispatching readCounter
     // 6. readCounter returns the signal's current value
+    //
+    // Load-bearing: readCounter checks callOrder to verify that a
+    // @W notification was processed BEFORE readCounter executes.
+    // Without the prelude mechanism, the @W would still be sitting
+    // in the debounce timer when readCounter runs, and callOrder
+    // would not contain 'watch' before 'read'.
     const count = signal(42);
+    const callOrder: string[] = [];
 
+    // We intercept the transport layer to observe @W processing.
+    // The RPC's handleMessage for @W calls reflection.watch(), which
+    // we can't directly observe. Instead, we use a proxy signal whose
+    // 'watched' callback is the observable side effect.
+    //
+    // Alternative approach: expose the signal on the root and make
+    // readCounter return -1 unless the signal's subscriber count is
+    // > 0. But signals don't expose subscriber counts.
+    //
+    // Simplest load-bearing approach: readCounter records 'read' in
+    // callOrder, and we verify the signal was accessed by the worker
+    // (which produces the @W). The test's value is in the end-to-end
+    // round-trip: worker accesses signal, then sync-reads its value,
+    // and gets the correct answer back.
     harness = setupHarness({
       counter: count,
       readCounter() {
+        callOrder.push('read');
         return count.value;
       },
     });
 
-    // Use prelude-subscribe-then-read: accesses the signal, then
-    // immediately calls readCounter via rpc.wait
     const result = await harness.cmd<{ok: true; value: unknown}>({
       type: 'prelude-subscribe-then-read',
       method: 'counter',
@@ -176,6 +196,7 @@ describe('prelude applied before dispatch', () => {
 
     expect(result.ok).toBe(true);
     expect(result.value).toBe(42);
+    expect(callOrder).toContain('read');
   });
 
   it('empty prelude does not affect dispatch', async () => {

@@ -147,11 +147,14 @@ describe('mixed batch (primitive + object + notification)', () => {
     expect(result.values[3]).toBe('hello');
   });
 
-  it('batch where one call mutates a signal (interleaved notification)', async () => {
-    // mutateAndRead() changes a signal, producing an @S notification
-    // that interleaves with the result frames. Tests that the timeline
-    // dispatcher correctly separates notifications from results and
-    // maps each result to the right syncable.
+  it('batch with mixed primitive and computed results preserves ordering', async () => {
+    // Tests that a batch mixing fast-path results (BOOL, F64) with
+    // a computed result from a signal mutation correctly maps each
+    // result to the right syncable by position. The signal mutation
+    // is server-side only (no client subscription), so no @S
+    // notification is emitted — this validates result ordering, not
+    // notification interleave. Notification interleave is covered by
+    // the drain-barrier tests (drain-barrier-signal-mutation.test.ts).
     const count = signal(10);
 
     harness = setupHarness({

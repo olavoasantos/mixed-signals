@@ -109,6 +109,12 @@ export function decodeHeader(
   const len = view.getInt32(4, true);
   const inlineVal = view.getFloat64(8, true);
 
+  if (len < 0) {
+    throw new RangeError(
+      `decodeHeader: negative LEN=${len} at offset ${offset}`,
+    );
+  }
+
   const totalSize = HEADER_SIZE + len;
   if (remaining < totalSize) {
     throw new RangeError(
