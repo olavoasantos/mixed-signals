@@ -84,12 +84,15 @@ export class SyncRPCIframeBridgeError extends SyncRPCError {
 }
 
 /**
- * A single call's encoded arguments exceed the data SAB's capacity. With
- * a default 64 KiB data SAB (max 256 KiB), a request envelope whose JSON
- * encoding is larger than the configured size cannot be transmitted even
- * with chunking — a single chunk is bounded by the SAB. Use a smaller
- * request shape, or configure a larger `dataSabSize` at sync-server setup
- * (up to the 256 KiB ceiling).
+ * Reserved for future hard payload limits. The chunk-state machine
+ * streams payloads of arbitrary size through the fixed-size data SAB,
+ * so no payload size triggers this error under the v1 protocol. The
+ * class is retained in the public surface for forward compatibility:
+ * a future memory-budget or max-reassembly-buffer limit may wire a
+ * throw site, and user code that proactively catches
+ * `SyncRPCPayloadTooLargeError` will work without changes.
+ *
+ * `.name` is `'SyncRPCPayloadTooLargeError'` (stable, public API).
  */
 export class SyncRPCPayloadTooLargeError extends SyncRPCError {
   override name = 'SyncRPCPayloadTooLargeError';

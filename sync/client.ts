@@ -166,13 +166,39 @@ export function enableSyncClient(
         !(msg.control instanceof SharedArrayBuffer) ||
         !(msg.data instanceof SharedArrayBuffer)
       ) {
-        handshakeReject?.(
-          new SyncRPCIframeBridgeError(
-            'sync handshake response carried malformed SAB fields; ' +
-              'verify the host wrapper and that the parent ↔ iframe ' +
-              'boundary is same-origin (see design §6.3)',
-          ),
-        );
+        // Specific diagnostic: ArrayBuffer instead of SharedArrayBuffer
+        // means the SAB was copied across a cross-origin agent-cluster
+        // boundary and lost its shared backing.
+        const controlIsAB =
+          typeof ArrayBuffer !== 'undefined' &&
+          msg.control instanceof ArrayBuffer;
+        const dataIsAB =
+          typeof ArrayBuffer !== 'undefined' &&
+          msg.data instanceof ArrayBuffer;
+
+        if (controlIsAB || dataIsAB) {
+          handshakeReject?.(
+            new SyncRPCIframeBridgeError(
+              'enableSyncClient: hs-res carried ArrayBuffer instead of ' +
+                'SharedArrayBuffer ' +
+                `(control=${controlIsAB ? 'ArrayBuffer' : typeof msg.control}, ` +
+                `data=${dataIsAB ? 'ArrayBuffer' : typeof msg.data}). ` +
+                'The SAB was copied across a cross-origin agent-cluster boundary ' +
+                'and lost its shared backing. ' +
+                'Ensure all documents in the chain share an origin and are ' +
+                'cross-origin-isolated, or use createIframeBrokerBridge.',
+            ),
+          );
+        } else {
+          handshakeReject?.(
+            new SyncRPCIframeBridgeError(
+              'enableSyncClient: hs-res carried malformed SAB fields ' +
+                `(control=${typeof msg.control}, data=${typeof msg.data}). ` +
+                'Verify the host wrapper allocated SharedArrayBuffers and that ' +
+                'the parent ↔ iframe boundary is same-origin.',
+            ),
+          );
+        }
         return;
       }
       control = msg.control;
@@ -319,10 +345,10 @@ export function enableSyncClient(
     // 1 s with a generic error — confusing and slow.
     if (batchTransferables.length > 0 && sidecarPort === null) {
       throw new SyncRPCIframeBridgeError(
-        'sync call contains Transferable values but no sidecar channel ' +
-          'was established during handshake. The base transport must ' +
-          'propagate ctx.transfer in its send() method for transferable ' +
-          'support. See the sync transport configuration guide.',
+        'rpc.wait: sync call contains Transferable values but no sidecar ' +
+          'channel was established during handshake. ' +
+          'The base transport must propagate ctx.transfer in its send() ' +
+          'method for transferable support.',
       );
     }
 
