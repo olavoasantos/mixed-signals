@@ -51,6 +51,7 @@ interface HandshakeRes {
   control: SharedArrayBuffer;
   data: SharedArrayBuffer;
   epoch?: number;
+  sidecar?: MessagePort;
 }
 
 function isHandshakeRes(data: unknown): data is HandshakeRes {
@@ -129,6 +130,11 @@ export function enableSyncClient(
   let controlView!: Int32Array;
   let dataU8!: Uint8Array;
 
+  // Sidecar MessagePort for transferable ownership. Received from
+  // the host in the hs-res envelope. The caller stores and starts
+  // it; posts transferable values here after the SAB doorbell.
+  let sidecarPort: MessagePort | null = null;
+
   // Subscription routing. Until the consumer calls
   // `wrapper.onMessage(cb)`, inbound non-handshake messages are
   // buffered to preserve arrival order across the subscription
@@ -166,6 +172,20 @@ export function enableSyncClient(
       data = msg.data;
       controlView = new Int32Array(control);
       dataU8 = new Uint8Array(data);
+      // Store and start the sidecar port for transferable ownership.
+      // Present when the transport propagates ctx.transfer; absent
+      // when it doesn't (the server falls back to hs-res without
+      // sidecar). The client proceeds without sidecar and
+      // transferable sends are skipped.
+      if (
+        msg.sidecar &&
+        typeof MessagePort !== 'undefined' &&
+        msg.sidecar instanceof MessagePort
+      ) {
+        sidecarPort = msg.sidecar;
+        sidecarPort.start();
+      }
+
       handshakeResolved = true;
       handshakeResolve?.();
       return;

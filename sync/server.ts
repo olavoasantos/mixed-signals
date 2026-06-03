@@ -48,6 +48,7 @@ type SyncControl =
       control: SharedArrayBuffer;
       data: SharedArrayBuffer;
       epoch: number;
+      sidecar?: MessagePort;
     }
   | {__sync: 'doorbell'; seq: number}
   | {__sync: 'pull'; seq: number}
@@ -218,6 +219,12 @@ export function enableSyncServer(
   // doorbells, drained when the caller writes DONE.
   let requestAccumulator: Uint8Array | null = null;
 
+  // Sidecar MessagePort for transferable ownership. The host keeps
+  // port1 and starts it; port2 is transferred to the caller in
+  // the hs-res envelope. Allocated at handshake time; closed on
+  // client death or rehandshake.
+  let sidecarPort: MessagePort | null = null;
+
   // The single callback `rpc.addClient` registers via the wrapper's
   // `onMessage`. Non-sync inbound traffic and synthesized inbound calls
   // both flow through this.
@@ -309,6 +316,27 @@ export function enableSyncServer(
     abortActiveBatch();
     requestAccumulator = null;
 
+    // Close any prior sidecar port. A rehandshake means the caller
+    // has a fresh client; the old sidecar channel is dead.
+    if (sidecarPort !== null) {
+      try {
+        sidecarPort.close();
+      } catch (_) {
+        /* port may already be closed */
+      }
+    }
+
+    // Create a fresh sidecar channel for transferable ownership.
+    // The host keeps port1; port2 is transferred to the caller in
+    // a separate `hs-sidecar` message (not embedded in `hs-res`)
+    // because MessagePort is a Transferable that cannot be
+    // structured-cloned — it MUST appear in the postMessage transfer
+    // list. Sending it separately keeps hs-res backward-compatible
+    // with transports that don't propagate ctx.transfer.
+    const sidecarChannel = new MessageChannel();
+    sidecarPort = sidecarChannel.port1;
+    sidecarPort.start();
+
     // Reset lifecycle state from any prior death on this wrapper.
     // Without this, a wrapper that has processed a death permanently
     // drops all future doorbells (CALLER_STATE stays DEAD) and
@@ -336,12 +364,36 @@ export function enableSyncServer(
       // Re-handshake: fresh log, but serverOutSeq continues monotonically.
       replayLog = new ReplayLog();
     }
-    transport.send({
-      __sync: 'hs-res',
+    // Send hs-res with the sidecar port. The port MUST appear in
+    // both the message data AND the ctx.transfer list: Node
+    // worker_threads delivers transferred ports as properties of the
+    // message, while the transfer list tells postMessage to transfer
+    // (not clone) them.
+    //
+    // If the transport can't handle transfer lists (e.g., test stubs,
+    // the fake worker's postMessage that silently accepts anything),
+    // we fall back to sending hs-res without the sidecar. The client
+    // proceeds without sidecar and transferable values won't
+    // round-trip.
+    const hsRes = {
+      __sync: 'hs-res' as const,
       control,
       data,
       epoch: currentEpoch,
-    } satisfies SyncControl);
+      sidecar: sidecarChannel.port2,
+    };
+    try {
+      transport.send(hsRes, {transfer: [sidecarChannel.port2]});
+    } catch (_) {
+      // Transport doesn't support transfer lists. Re-send hs-res
+      // without the sidecar port.
+      transport.send({
+        __sync: 'hs-res',
+        control,
+        data,
+        epoch: currentEpoch,
+      } satisfies SyncControl);
+    }
   }
 
   // ── Client-dead handler ──────────────────────────────────────────────
@@ -369,6 +421,9 @@ export function enableSyncServer(
     }
     // Abort any in-flight batch for this worker.
     abortActiveBatch();
+    // Close the sidecar port — the client is gone, nobody will
+    // post transferables on the other end.
+    closeSidecarPort();
     // Invoke user callback (typically wired to rpc.removeClient).
     if (onClientDead) {
       try {
@@ -389,10 +444,22 @@ export function enableSyncServer(
    *
    * @internal
    */
+  function closeSidecarPort(): void {
+    if (sidecarPort !== null) {
+      try {
+        sidecarPort.close();
+      } catch (_) {
+        /* port may already be closed */
+      }
+      sidecarPort = null;
+    }
+  }
+
   function notifyClientDeadFromPoll(clientId: string): void {
     if (!clientId || deadClients.has(clientId)) return;
     deadClients.add(clientId);
     abortActiveBatch();
+    closeSidecarPort();
     if (onClientDead) {
       try {
         onClientDead(clientId);
@@ -815,6 +882,7 @@ export function enableSyncServer(
       storeCtrl(controlView, CTRL.CALLER_STATE, CALLER_STATE.DEAD);
     }
     abortActiveBatch();
+    closeSidecarPort();
     if (onClientDead) {
       try {
         onClientDead(clientId);
