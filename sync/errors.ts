@@ -94,3 +94,18 @@ export class SyncRPCIframeBridgeError extends SyncRPCError {
 export class SyncRPCPayloadTooLargeError extends SyncRPCError {
   override name = 'SyncRPCPayloadTooLargeError';
 }
+
+/**
+ * A host method returned a value containing a `Transferable` (ArrayBuffer,
+ * MessagePort, etc.) from a sync RPC call. Response-side transferable values
+ * are not yet supported — they would silently corrupt to `{}` during JSON
+ * serialization into the SAB. This error is the loud failure that prevents
+ * that silent corruption.
+ *
+ * Response-side transferable transfer is a planned capability (deferred to a
+ * future milestone). Until then, restructure the host method to avoid
+ * returning raw Transferable values.
+ */
+export class SyncRPCResponseTransferableError extends SyncRPCError {
+  override name = 'SyncRPCResponseTransferableError';
+}

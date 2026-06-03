@@ -3,8 +3,13 @@ import type {
   TransportContext,
   WireMessage,
 } from '../shared/protocol.ts';
-import {SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
+import {SyncRPCError, SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
 import {CHUNK_STATE, CTRL, loadCtrl, storeCtrl} from './lane.ts';
+import {
+  collectAndReplaceSyncTransferables,
+  type CollectedTransferable,
+  type SidecarMessage,
+} from './transferables.ts';
 
 /**
  * Idle-path frame envelope emitted by `enableSyncServer`.
@@ -51,6 +56,7 @@ interface HandshakeRes {
   control: SharedArrayBuffer;
   data: SharedArrayBuffer;
   epoch?: number;
+  sidecar?: MessagePort;
 }
 
 function isHandshakeRes(data: unknown): data is HandshakeRes {
@@ -129,6 +135,11 @@ export function enableSyncClient(
   let controlView!: Int32Array;
   let dataU8!: Uint8Array;
 
+  // Sidecar MessagePort for transferable ownership. Received from
+  // the host in the hs-res envelope. The caller stores and starts
+  // it; posts transferable values here after the SAB doorbell.
+  let sidecarPort: MessagePort | null = null;
+
   // Subscription routing. Until the consumer calls
   // `wrapper.onMessage(cb)`, inbound non-handshake messages are
   // buffered to preserve arrival order across the subscription
@@ -166,6 +177,20 @@ export function enableSyncClient(
       data = msg.data;
       controlView = new Int32Array(control);
       dataU8 = new Uint8Array(data);
+      // Store and start the sidecar port for transferable ownership.
+      // Present when the transport propagates ctx.transfer; absent
+      // when it doesn't (the server falls back to hs-res without
+      // sidecar). The client proceeds without sidecar and
+      // transferable sends are skipped.
+      if (
+        msg.sidecar &&
+        typeof MessagePort !== 'undefined' &&
+        msg.sidecar instanceof MessagePort
+      ) {
+        sidecarPort = msg.sidecar;
+        sidecarPort.start();
+      }
+
       handshakeResolved = true;
       handshakeResolve?.();
       return;
@@ -248,7 +273,41 @@ export function enableSyncClient(
     // envelope-build time. The host uses this to determine which
     // replay-log frames to prepend to the response timeline.
     const clientAppliedSeq = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
-    const envelope = {seq, clientAppliedSeq, calls};
+
+    // ── Transferable substitution ────────────────────────────────────────
+    // Walk the batch's call params and replace any Transferable values
+    // (ArrayBuffer, MessagePort, etc.) with {@T:'transfer', id:N}
+    // sentinels. The actual values are collected for sidecar emission
+    // after the SAB doorbell. IDs are per-batch, monotonic from 1.
+    const {calls: sentinelCalls, transferables: batchTransferables} =
+      collectAndReplaceSyncTransferables(
+        calls.filter(
+          (c): c is {type: 'call'; id: number; method: string; params: unknown[]} =>
+            c.type === 'call',
+        ),
+      );
+    // Rebuild the full calls array with sentinel-substituted params.
+    const finalCalls: WireMessage[] = calls.map((c) => {
+      if (c.type !== 'call') return c;
+      const replaced = sentinelCalls.find((sc) => sc.id === c.id);
+      return replaced ? {...c, params: replaced.params} : c;
+    });
+
+    // Fail fast if the batch contains transferables but the sidecar
+    // port was not established at handshake time (transport doesn't
+    // support transfer lists). Without this guard, sentinels go into
+    // the SAB, no sidecar posts happen, and the host times out after
+    // 1 s with a generic error — confusing and slow.
+    if (batchTransferables.length > 0 && sidecarPort === null) {
+      throw new SyncRPCIframeBridgeError(
+        'sync call contains Transferable values but no sidecar channel ' +
+          'was established during handshake. The base transport must ' +
+          'propagate ctx.transfer in its send() method for transferable ' +
+          'support. See the sync transport configuration guide.',
+      );
+    }
+
+    const envelope = {seq, clientAppliedSeq, calls: finalCalls};
     const requestJson = JSON.stringify(envelope);
     const encoded = new TextEncoder().encode(requestJson);
     const totalBytes = encoded.byteLength;
@@ -330,6 +389,31 @@ export function enableSyncClient(
         }
       }
     } while (offset < totalBytes);
+
+    // ── Sidecar transferable emission ───────────────────────────────────
+    // After the SAB doorbell, post each collected transferable via
+    // the sidecar MessagePort. Each post transfers ownership of the
+    // value out of the caller's realm. Order: SAB first, then
+    // sidecar in id-order. The host's receive path handles either
+    // arrival order.
+    if (batchTransferables.length > 0 && sidecarPort !== null) {
+      for (const t of batchTransferables) {
+        const msg: SidecarMessage = {seq, id: t.id, value: t.value};
+        try {
+          sidecarPort.postMessage(msg, [t.value]);
+        } catch (err) {
+          // The value was already detached or the post failed.
+          // Surface as SyncRPCError from rpc.wait.
+          const typeName = (t.value as {constructor?: {name?: string}})
+            .constructor?.name ?? 'Transferable';
+          throw new SyncRPCError(
+            `Failed to transfer ${typeName} (id=${t.id}) via sidecar: ${
+              (err as Error).message
+            }`,
+          );
+        }
+      }
+    }
 
     // ── Response side ────────────────────────────────────────────────────
     chunkIndex = 0;

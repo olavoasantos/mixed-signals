@@ -41,6 +41,7 @@ export {
   SyncRPCNotCrossOriginIsolatedError,
   SyncRPCPayloadTooLargeError,
   SyncRPCReentrancyError,
+  SyncRPCResponseTransferableError,
   SyncRPCTimeoutError,
   SyncRPCUnsupportedContextError,
 } from './errors.ts';

@@ -28,6 +28,7 @@ describe('mixed-signals/sync public surface', () => {
     'SyncRPCNotCrossOriginIsolatedError',
     'SyncRPCPayloadTooLargeError',
     'SyncRPCReentrancyError',
+    'SyncRPCResponseTransferableError',
     'SyncRPCTimeoutError',
     'SyncRPCUnsupportedContextError',
   ];
