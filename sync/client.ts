@@ -285,7 +285,7 @@ export function enableSyncClient(
         // to read once. The host doesn't `Atomics.wait` on
         // REQUEST_SEQ (it can't from a main thread), but the notify
         // is kept for symmetry and future use (drain barrier in
-        // M002+ may consume the SEQ slot).
+        // the drain barrier may consume the SEQ slot).
         storeCtrl(controlView, CTRL.BATCH_SIZE, calls.length);
         storeCtrl(controlView, CTRL.REQUEST_SEQ, seq);
         Atomics.notify(controlView, CTRL.REQUEST_SEQ);

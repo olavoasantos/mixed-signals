@@ -1,5 +1,5 @@
 /**
- * Teardown lifecycle integration tests (M003I008T–M003I011T).
+ * Teardown lifecycle integration tests (the full death-detection chain).
  *
  * These tests exercise the full death-detection chain end-to-end
  * using real `worker_threads` Workers and the production
@@ -147,9 +147,9 @@ function setupHarness(
   };
 }
 
-// ── M003I008T: Worker terminate mid-wait ─────────────────────────────
+// ── terminate-mid-wait: Worker terminate mid-wait ─────────────────────────────
 
-describe('M003I008T — worker terminate mid-Atomics.wait', () => {
+describe('terminate-mid-wait — worker terminate mid-Atomics.wait', () => {
   let h: Harness | undefined;
 
   afterEach(async () => {
@@ -195,9 +195,9 @@ describe('M003I008T — worker terminate mid-Atomics.wait', () => {
   });
 });
 
-// ── M003I009T: HMR scenario (dispose + recreate) ────────────────────
+// ── HMR-epoch-rejection: HMR scenario (dispose + recreate) ────────────────────
 
-describe('M003I009T — HMR scenario (dispose + recreate)', () => {
+describe('HMR-epoch-rejection — HMR scenario (dispose + recreate)', () => {
   it('rejects stale client_dead from old bridge after new bridge handshakes', async () => {
     const onClientDeadCalls: string[] = [];
     const base: RawTransport = {
@@ -270,9 +270,9 @@ describe('M003I009T — HMR scenario (dispose + recreate)', () => {
   });
 });
 
-// ── M003I010T: Hard crash recovery via timeoutMs ────────────────────
+// ── timeout-recovery: Hard crash recovery via timeoutMs ────────────────────
 
-describe('M003I010T — hard crash recovery via timeoutMs', () => {
+describe('timeout-recovery — hard crash recovery via timeoutMs', () => {
   let h: Harness | undefined;
 
   afterEach(async () => {
@@ -308,9 +308,9 @@ describe('M003I010T — hard crash recovery via timeoutMs', () => {
   });
 });
 
-// ── M003I011T: Refcount-leak prevention ─────────────────────────────
+// ── refcount-leak-prevention: Refcount-leak prevention ─────────────────────────────
 
-describe('M003I011T — refcount-leak prevention', () => {
+describe('refcount-leak-prevention — refcount-leak prevention', () => {
   let h: Harness | undefined;
 
   afterEach(async () => {

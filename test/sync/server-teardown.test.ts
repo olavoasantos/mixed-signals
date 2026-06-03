@@ -1,9 +1,9 @@
 /**
  * Tests for the server-side teardown features:
  *
- *   - M003I007T: Epoch tracking through handshake
- *   - M003I006T: Host client_dead handler + onClientDead callback
- *   - M003I005T: Host-side CALLER_STATE poll
+ *   - Epoch tracking through handshake
+ *   - Host client_dead handler + onClientDead callback
+ *   - Host-side CALLER_STATE poll
  *
  * Uses the same stub-transport testing approach as enable-server.test.ts.
  */
@@ -65,7 +65,7 @@ function extractHsRes(sent: unknown[]): {
   return hs;
 }
 
-// ── M003I007T: Epoch tracking ──────────────────────────────────────────
+// ── Epoch tracking ──────────────────────────────────────────
 
 describe('epoch tracking through handshake', () => {
   it('includes epoch in hs-res response', () => {
@@ -130,7 +130,7 @@ describe('epoch tracking through handshake', () => {
   });
 });
 
-// ── M003I006T: Host client_dead handler ────────────────────────────────
+// ── Host client_dead handler ────────────────────────────────
 
 describe('host client_dead handler + onClientDead callback', () => {
   it('invokes onClientDead with the clientId from the notification', () => {
@@ -229,7 +229,7 @@ describe('host client_dead handler + onClientDead callback', () => {
   });
 });
 
-// ── M003I005T: Host-side CALLER_STATE poll ─────────────────────────────
+// ── Host-side CALLER_STATE poll ─────────────────────────────
 
 describe('host-side CALLER_STATE poll', () => {
   it('aborts response chunk write when CALLER_STATE is DEAD', async () => {

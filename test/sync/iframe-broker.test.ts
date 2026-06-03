@@ -1,6 +1,6 @@
 /**
  * Unit tests for `createIframeBrokerBridge`. Mock-based; full
- * end-to-end cross-origin Playwright coverage lands in M008 / M009.
+ * end-to-end cross-origin Playwright coverage lands in a later milestone.
  */
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {

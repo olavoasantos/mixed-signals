@@ -230,7 +230,7 @@ export function enableSyncServer(
   // own id space is impossible.
   let nextSynthId = 1_000_000;
 
-  // ── Epoch tracking (M003I007T) ──────────────────────────────────────
+  // ── Epoch tracking ────────────────────────────────────────────────────
 
   // Monotonic epoch counter. Incremented on each handshake; returned
   // in `hs-res` and validated on incoming `client_dead` notifications.
@@ -238,14 +238,14 @@ export function enableSyncServer(
   let nextEpoch = 1;
   let currentEpoch = 0;
 
-  // ── Client-dead dedup (M003I006T) ─────────────────────────────────────
+  // ── Client-dead dedup ─────────────────────────────────────────────────
 
   // Set of clientIds already processed for death. Prevents duplicate
   // `onClientDead` invocations when both the SAB poll and the
   // postMessage notification fire for the same worker.
   const deadClients = new Set<string>();
 
-  // ── Drain-barrier bookkeeping (M002) ──────────────────────────────────
+  // ── Drain-barrier bookkeeping ─────────────────────────────────────────
 
   // Per-client replay log. Instantiated at handshake time. Holds
   // idle-path outbound frames for replay into the next sync call's
@@ -344,7 +344,7 @@ export function enableSyncServer(
     } satisfies SyncControl);
   }
 
-  // ── Client-dead handler (M003I006T) ──────────────────────────────────
+  // ── Client-dead handler ──────────────────────────────────────────────
 
   function handleClientDead(msg: {epoch: number; clientId: string}): void {
     const {epoch, clientId} = msg;
@@ -355,7 +355,7 @@ export function enableSyncServer(
     // Reject stale epoch (HMR: old bridge's notification after new
     // bridge handshaked). Only the current epoch is valid.
     if (epoch !== currentEpoch) return;
-    // Dedup: both the SAB poll (M003I005T) and the postMessage
+    // Dedup: both the SAB poll and the postMessage
     // notification can fire for the same worker.
     if (deadClients.has(clientId)) return;
     deadClients.add(clientId);
@@ -383,7 +383,7 @@ export function enableSyncServer(
   }
 
   /**
-   * Notify client death from the SAB poll path (M003I005T). Uses
+   * Notify client death from the SAB poll path. Uses
    * the same dedup set as `handleClientDead` so only one
    * `onClientDead` fires per worker.
    *
@@ -439,7 +439,7 @@ export function enableSyncServer(
       return;
     }
     if (loadCtrl(controlView, CTRL.CALLER_STATE) === CALLER_STATE.DEAD) {
-      // Lifecycle owner has signalled the caller is gone (M003+).
+      // Lifecycle owner has signalled the caller is gone.
       // Drop the request silently; do not write a response that nobody
       // will read.
       return;
@@ -503,7 +503,7 @@ export function enableSyncServer(
     const calls = envelope.calls;
 
     // Read the caller's applied-seq watermark. Defaults to
-    // 0 for pre-M002 clients that don't send it yet.
+    // 0 for clients that don't send it yet.
     const clientAppliedSeq = envelope.clientAppliedSeq ?? 0;
 
     // Build a fresh BatchContext for this batch. `done` resolves when
@@ -637,7 +637,7 @@ export function enableSyncServer(
 
     // Publish RESPONSE_SEQ — informational. The caller's wake signal
     // is `CHUNK_STATE = DONE_RES` on the final chunk; bumping
-    // RESPONSE_SEQ here is for debuggability and M002+ (drain barrier
+    // RESPONSE_SEQ here is for debuggability (the drain barrier
     // expects this slot to track per-batch completion).
     storeCtrl(controlView, CTRL.RESPONSE_SEQ, seq);
 
@@ -673,7 +673,7 @@ export function enableSyncServer(
     ) {
       return;
     }
-    // ── CALLER_STATE poll (M003I005T) ─────────────────────────────────
+    // ── CALLER_STATE poll ────────────────────────────────────────────
     // Before writing each response chunk, check whether the caller is
     // dead. Cost: ~3-5 ns per chunk (one Atomics.load). If dead, abort
     // the response — nobody will read it.
