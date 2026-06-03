@@ -1208,6 +1208,7 @@ function classifyFrame(frame: WireMessage): {
   if (frame.type === 'result') {
     const {value} = frame;
 
+
     // VOID: undefined result
     if (value === undefined) {
       return {type: WIRE_TYPE.VOID, inlineVal: 0, payload: undefined};
