@@ -74,12 +74,13 @@ describe('ClientReflection.flushForSyncPrelude', () => {
     const prelude = reflection.flushForSyncPrelude();
 
     expect(prelude).toHaveLength(3);
-    expect(prelude[0]!.method).toBe('@W');
-    expect(prelude[0]!.params).toEqual(['s1']);
-    expect(prelude[1]!.method).toBe('@U');
-    expect(prelude[1]!.params).toEqual(['s2']);
-    expect(prelude[2]!.method).toBe('@D');
-    expect(prelude[2]!.params).toEqual(['o3']);
+    const [w, u, d] = prelude as Array<{type: string; method: string; params: unknown[]}>;
+    expect(w!.method).toBe('@W');
+    expect(w!.params).toEqual(['s1']);
+    expect(u!.method).toBe('@U');
+    expect(u!.params).toEqual(['s2']);
+    expect(d!.method).toBe('@D');
+    expect(d!.params).toEqual(['o3']);
   });
 
   it('cancels debounce timers so they do not fire after flush', async () => {
@@ -114,6 +115,19 @@ describe('ClientReflection.flushForSyncPrelude', () => {
     expect(notifyCalls[0]!.params).toEqual(['s2']);
   });
 
+  it('handles only @W batch when only watches are pending', () => {
+    const {rpc} = createMockRpc();
+    const reflection = new ClientReflection(rpc);
+
+    reflection.scheduleWatch('s1');
+    const prelude = reflection.flushForSyncPrelude();
+
+    expect(prelude).toHaveLength(1);
+    const entry = prelude[0] as {type: string; method: string; params: unknown[]};
+    expect(entry.method).toBe('@W');
+    expect(entry.params).toEqual(['s1']);
+  });
+
   it('consecutive flushes in the same tick: only first has content', () => {
     const {rpc} = createMockRpc();
     const reflection = new ClientReflection(rpc);
@@ -140,8 +154,9 @@ describe('ClientReflection.flushForSyncPrelude', () => {
     const prelude = reflection.flushForSyncPrelude();
 
     expect(prelude).toHaveLength(1);
-    expect(prelude[0]!.method).toBe('@W');
-    const ids = prelude[0]!.params as string[];
+    const entry = prelude[0] as {type: string; method: string; params: unknown[]};
+    expect(entry.method).toBe('@W');
+    const ids = entry.params as string[];
     expect(ids).toHaveLength(3);
     expect(ids).toContain('s1');
     expect(ids).toContain('s2');

@@ -652,6 +652,7 @@ export function enableSyncServer(
     const envelope = JSON.parse(requestJson) as {
       seq: number;
       clientAppliedSeq?: number;
+      prelude?: WireMessage[];
       calls: Array<{method: string; params?: unknown[]}>;
     };
     const calls = envelope.calls;
@@ -659,6 +660,23 @@ export function enableSyncServer(
     // Read the caller's applied-seq watermark. Defaults to
     // 0 for clients that don't send it yet.
     const clientAppliedSeq = envelope.clientAppliedSeq ?? 0;
+
+    // ── Apply prelude notifications BEFORE dispatch ────────────────
+    // The prelude carries @W / @U / @D notifications flushed from
+    // the caller's ClientReflection. Dispatching them through the
+    // same code path async notifications use ensures the host's
+    // Reflection state is up-to-date before calls execute. This
+    // is what makes "subscribe then immediately read" work.
+    if (envelope.prelude && envelope.prelude.length > 0) {
+      for (const entry of envelope.prelude) {
+        try {
+          rpcOnMessage?.(entry);
+        } catch (_) {
+          // Prelude entry processing failure is non-fatal — log and
+          // continue with remaining entries + batch dispatch.
+        }
+      }
+    }
 
     // Build a fresh BatchContext for this batch. `done` resolves when
     // every expected response is captured OR when the batch is aborted

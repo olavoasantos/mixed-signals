@@ -353,6 +353,12 @@ export class RPCClient {
       };
     });
 
+    // Flush pending @W / @U / @D notification batches into the
+    // prelude so they travel inside the wait envelope. Without this,
+    // watches issued just before rpc.wait wouldn't be live on the
+    // host until their next debounce window.
+    const prelude = this.reflection.flushForSyncPrelude();
+
     // Guard `transport.wait` so any throw (timeout, malformed handshake,
     // future payload-too-large, etc.) settles every already-claimed
     // promise with the error before propagating. Without this, claimed
@@ -361,7 +367,7 @@ export class RPCClient {
     // "every claimed promise is settled".
     let timeline: WireMessage[];
     try {
-      timeline = this.transport.wait(calls, opts);
+      timeline = this.transport.wait(calls, {prelude, ...opts});
     } catch (err) {
       const wrapped = err instanceof Error ? err : new Error(String(err));
       for (const {promise} of claimed) {

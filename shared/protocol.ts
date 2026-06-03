@@ -56,7 +56,7 @@ type BaseTransport<Outgoing, Incoming, Ctx> = {
    */
   wait?(
     calls: WireMessage[],
-    opts?: {timeoutMs?: number},
+    opts?: {timeoutMs?: number; prelude?: WireMessage[]},
   ): WireMessage[];
 };
 

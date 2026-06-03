@@ -259,7 +259,7 @@ export function enableSyncClient(
 
   function wait(
     calls: WireMessage[],
-    waitOpts?: {timeoutMs?: number},
+    waitOpts?: {timeoutMs?: number; prelude?: WireMessage[]},
   ): WireMessage[] {
     if (waitOpts?.timeoutMs != null) {
       const t = waitOpts.timeoutMs;
@@ -309,7 +309,10 @@ export function enableSyncClient(
       );
     }
 
-    const envelope = {seq, clientAppliedSeq, calls: finalCalls};
+    // Include the prelude in the envelope so the host applies
+    // pending @W / @U / @D notifications before dispatching calls.
+    const prelude = waitOpts?.prelude ?? [];
+    const envelope = {seq, clientAppliedSeq, prelude, calls: finalCalls};
     const requestJson = JSON.stringify(envelope);
     const encoded = new TextEncoder().encode(requestJson);
     const totalBytes = encoded.byteLength;
