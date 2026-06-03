@@ -433,10 +433,14 @@ export class RPC {
       }
     } catch (error: any) {
       if (id !== undefined) {
-        this.sendError(clientId, id, {
+        const payload: {code: number; message: string; name?: string} = {
           code: -1,
           message: error?.message ?? String(error),
-        });
+        };
+        if (typeof error?.name === 'string' && error.name !== 'Error') {
+          payload.name = error.name;
+        }
+        this.sendError(clientId, id, payload);
       }
     }
   }

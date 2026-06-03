@@ -231,12 +231,14 @@ export function claimForSync<T>(
   const s = internals.get(p as unknown as object);
   if (!s) {
     throw new SyncRPCAlreadyWaitedError(
-      'value is not a SyncablePromise produced by this module',
+      'rpc.wait() requires SyncablePromise values from this client\'s proxy (e.g. rpc.root.foo()). Received a plain Promise or other value. ' +
+        'See docs/sync-mode.md#already-waited for details.',
     );
   }
   if (s.consumed) {
     throw new SyncRPCAlreadyWaitedError(
-      `SyncablePromise already consumed by ${s.consumer ?? 'unknown path'}`,
+      `SyncablePromise already consumed by '${s.consumer ?? 'unknown'}'. Each promise can only be consumed once \u2014 by await, .then, or rpc.wait. ` +
+        'See docs/sync-mode.md#already-waited for details.',
     );
   }
   s.consumed = true;
