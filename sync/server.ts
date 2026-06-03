@@ -68,7 +68,7 @@ interface BatchContext {
   /**
    * Side-effect notification frames (`@S`, `@P`, `@E`, etc.) captured
    * during the active sync batch, in emission order. These are interleaved
-   * with results in the response timeline (M002I005T).
+   * with results in the response timeline.
    */
   timeline: WireMessage[];
   /** Resolves when `captured.size === expected.size` OR `aborted`. */
@@ -367,7 +367,7 @@ export function enableSyncServer(
     };
     const calls = envelope.calls;
 
-    // M002I004T: read the caller's applied-seq watermark. Defaults to
+    // Read the caller's applied-seq watermark. Defaults to
     // 0 for pre-M002 clients that don't send it yet.
     const clientAppliedSeq = envelope.clientAppliedSeq ?? 0;
 

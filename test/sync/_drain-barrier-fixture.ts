@@ -84,7 +84,7 @@ function resolveSignal(root: any, path: string): {value: unknown} {
       void (async () => {
         try {
           switch (c.type) {
-            // ── M002I007T: signal mutation from sync call ────────────
+            // ── Signal mutation from sync call ──────────────────────
             case 'watch-and-sync-mutate': {
               const sig = resolveSignal(client.root, c.signalPath!);
               const observed: unknown[] = [];
@@ -110,7 +110,7 @@ function resolveSignal(root: any, path: string): {value: unknown} {
               return;
             }
 
-            // ── M002I008T: microtask exhaustion replay ───────────────
+            // ── Microtask exhaustion replay ───────────────────────
             case 'microtask-flood-then-sync': {
               const sig = resolveSignal(client.root, c.signalPath!);
               let updateCount = 0;
@@ -149,7 +149,7 @@ function resolveSignal(root: any, path: string): {value: unknown} {
               return;
             }
 
-            // ── M002I009T: between-call frame application ────────────
+            // ── Between-call frame application ──────────────────────
             case 'between-call-sync': {
               const sig = resolveSignal(client.root, c.signalPath!);
               const dispose = effect(() => {

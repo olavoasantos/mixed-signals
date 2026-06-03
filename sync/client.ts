@@ -7,7 +7,7 @@ import {SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
 import {CHUNK_STATE, CTRL, loadCtrl, storeCtrl} from './lane.ts';
 
 /**
- * Idle-path frame envelope emitted by `enableSyncServer` (M002I002T).
+ * Idle-path frame envelope emitted by `enableSyncServer`.
  * Distinguished from regular `WireMessage`s and other `SyncControl`
  * frames by `__sync: 'frame'`.
  *
@@ -166,7 +166,7 @@ export function enableSyncClient(
       return;
     }
 
-    // M002I003T: unwrap idle-path frame envelopes. The host wraps
+    // Unwrap idle-path frame envelopes. The host wraps
     // every idle-path outbound frame as `{__sync: 'frame', seq, msg}`
     // so the worker can checkpoint which frames it has applied.
     if (isSyncFrame(msg)) {
@@ -239,7 +239,7 @@ export function enableSyncClient(
     }
 
     const seq = nextSeq++;
-    // M002I004T: snapshot the caller's applied-seq watermark at
+    // Snapshot the caller's applied-seq watermark at
     // envelope-build time. The host uses this to determine which
     // replay-log frames to prepend to the response timeline.
     const clientAppliedSeq = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
@@ -404,7 +404,7 @@ export function enableSyncClient(
       }
     }
 
-    // M002I005T: the response uses the unified `timeline` shape.
+    // The response uses the unified `timeline` shape.
     return response.timeline ?? response.results ?? [];
   }
 

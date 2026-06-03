@@ -1,5 +1,5 @@
 /**
- * M002I008T — Drain-barrier test: microtask exhaustion replay.
+ * Drain-barrier test: microtask exhaustion replay.
  *
  * Simulates the headline win: worker floods microtasks while the host
  * emits async signal updates. After rpc.wait, all updates are replayed

@@ -1,5 +1,5 @@
 /**
- * M002I007T — Drain-barrier test: signal mutation from sync call.
+ * Drain-barrier test: signal mutation from sync call.
  *
  * Validates that when a sync method's body mutates a watched signal,
  * the worker reads the correct value immediately after rpc.wait

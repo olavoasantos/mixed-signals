@@ -1,5 +1,5 @@
 /**
- * M002I009T — Drain-barrier test: between-call frame application.
+ * Drain-barrier test: between-call frame application.
  *
  * Validates that frames the host emits via the async path between two
  * sync calls get correctly applied via the replay log during the

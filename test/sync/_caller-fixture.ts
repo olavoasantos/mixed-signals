@@ -3,7 +3,7 @@
  *
  * Runs in a `node:worker_threads` Worker. Drives the SAB caller
  * protocol directly using raw `Atomics.wait` + a `RawTransport` over
- * `parentPort`, independent of `enableSyncClient` (M001I003T). This
+ * `parentPort`, independent of `enableSyncClient`. This
  * lets `enable-server.test.ts` validate the host wrapper end-to-end
  * without depending on the caller-side wrapper.
  *
@@ -217,8 +217,8 @@ function runHandshake(): Promise<Extract<SyncControl, {__sync: 'hs-res'}>> {
  * across the data SAB, doorbell per chunk, `Atomics.wait` for acks,
  * accumulate response chunks, decode, return.
  *
- * Mirrors what `enableSyncClient`'s `wait?` method (M001I003T) will do,
- * but inlined here so this fixture has no dependency on M001I003T.
+ * Mirrors what `enableSyncClient`'s `wait?` method does, but inlined
+ * here so this fixture has no dependency on the caller-side wrapper.
  */
 function runWait(
   calls: Array<{method: string; params?: unknown[]}>,
@@ -350,7 +350,7 @@ function runWait(
     timeline?: WireMessage[];
     results?: WireMessage[];
   };
-  // M002I005T: unified timeline format. Extract result/error frames
+  // Unified timeline format. Extract result/error frames
   // positionally, dropping notification frames (which this low-level
   // fixture doesn't process).
   const all = response.timeline ?? response.results ?? [];

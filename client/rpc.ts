@@ -381,7 +381,7 @@ export class RPCClient {
         this.transport.decode,
       );
 
-    // M002I005T: iterate the timeline in order. The timeline
+    // Iterate the timeline in order. The timeline
     // interleaves notification frames (@S, @P, @E, etc.) with
     // result/error frames. Notifications are dispatched through the
     // existing handleNotification path so the client's reactive
