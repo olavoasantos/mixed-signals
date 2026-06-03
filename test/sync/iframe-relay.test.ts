@@ -474,7 +474,7 @@ describe('createIframeRelayBridge — teardown detection', () => {
       },
       origin: 'https://example.test',
       source: parentWindow,
-    } as Partial<MessageEvent>);
+    } as unknown as Partial<MessageEvent>);
 
     return {bridge, control};
   }
@@ -492,7 +492,7 @@ describe('createIframeRelayBridge — teardown detection', () => {
     const deadMsg = parentWindow.postMessage.mock.calls.find(
       (call) =>
         typeof call[0] === 'object' &&
-        call[0]?.__sync === 'client_dead',
+        (call[0] as {__sync?: string})?.__sync === 'client_dead',
     );
     expect(deadMsg).toBeDefined();
     expect(deadMsg![0]).toMatchObject({
@@ -540,12 +540,12 @@ describe('createIframeRelayBridge — teardown detection', () => {
 
     worker._emitEvent('error');
     const deadCallsAfterFirst = parentWindow.postMessage.mock.calls.filter(
-      (call) => call[0]?.__sync === 'client_dead',
+      (call) => (call[0] as {__sync?: string})?.__sync === 'client_dead',
     ).length;
 
     worker._emitEvent('error');
     const deadCallsAfterSecond = parentWindow.postMessage.mock.calls.filter(
-      (call) => call[0]?.__sync === 'client_dead',
+      (call) => (call[0] as {__sync?: string})?.__sync === 'client_dead',
     ).length;
 
     expect(deadCallsAfterSecond).toBe(deadCallsAfterFirst);
@@ -580,7 +580,7 @@ describe('createIframeRelayBridge — teardown detection', () => {
     worker._emitEvent('error');
 
     const deadMsg = parentWindow.postMessage.mock.calls.find(
-      (call) => call[0]?.__sync === 'client_dead',
+      (call) => (call[0] as {__sync?: string})?.__sync === 'client_dead',
     );
     expect(deadMsg).toBeDefined();
     expect(deadMsg![0]).toMatchObject({
