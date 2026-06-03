@@ -437,7 +437,7 @@ export class RPC {
           code: -1,
           message: error?.message ?? String(error),
         };
-        if (error?.name && error.name !== 'Error') {
+        if (typeof error?.name === 'string' && error.name !== 'Error') {
           payload.name = error.name;
         }
         this.sendError(clientId, id, payload);
