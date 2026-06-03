@@ -418,8 +418,12 @@ export class RPCClient {
         settleSyncable(promise, {ok: true, value: hydrated});
         out[i] = hydrated;
       } else if (r?.type === 'error') {
-        const hydrated = hydrate(r.value) as {message?: string} | undefined;
+        const hydrated = hydrate(r.value) as {message?: string; name?: string} | undefined;
         const err = new Error(hydrated?.message ?? 'RPC error');
+        // Preserve the error name from the wire so typed sync errors
+        // (e.g., SyncRPCResponseTransferableError) are identifiable on
+        // the caller side via err.name.
+        if (hydrated?.name) err.name = hydrated.name;
         settleSyncable(promise, {ok: false, error: err});
         out[i] = undefined;
         if (!firstError) firstError = err;

@@ -293,6 +293,20 @@ export function enableSyncClient(
       return replaced ? {...c, params: replaced.params} : c;
     });
 
+    // Fail fast if the batch contains transferables but the sidecar
+    // port was not established at handshake time (transport doesn't
+    // support transfer lists). Without this guard, sentinels go into
+    // the SAB, no sidecar posts happen, and the host times out after
+    // 1 s with a generic error — confusing and slow.
+    if (batchTransferables.length > 0 && sidecarPort === null) {
+      throw new SyncRPCIframeBridgeError(
+        'sync call contains Transferable values but no sidecar channel ' +
+          'was established during handshake. The base transport must ' +
+          'propagate ctx.transfer in its send() method for transferable ' +
+          'support. See the sync transport configuration guide.',
+      );
+    }
+
     const envelope = {seq, clientAppliedSeq, calls: finalCalls};
     const requestJson = JSON.stringify(envelope);
     const encoded = new TextEncoder().encode(requestJson);

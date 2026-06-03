@@ -32,6 +32,7 @@
  */
 
 import {isTransferable} from '../shared/codec.ts';
+import {SyncRPCError} from './errors.ts';
 
 
 /** Reserved `@T` tag for sidecar transferable sentinels. */
@@ -104,6 +105,19 @@ export function collectAndReplaceSyncTransferables<
   function walkValue(v: unknown): unknown {
     if (v === null || v === undefined) return v;
     if (typeof v !== 'object') return v;
+    // SharedArrayBuffer is not a Transferable but cannot survive
+    // JSON serialization (stringifies to '{}'). Reject it loudly
+    // so the user doesn't get silent data corruption.
+    if (
+      typeof SharedArrayBuffer !== 'undefined' &&
+      v instanceof SharedArrayBuffer
+    ) {
+      throw new SyncRPCError(
+        'SharedArrayBuffer cannot be passed as a sync RPC argument. ' +
+          'SharedArrayBuffer is not a Transferable and cannot survive ' +
+          'JSON serialization into the SAB lane.',
+      );
+    }
     if (isTransferable(v)) {
       const id = nextId++;
       transferables.push({id, value: v as Transferable});
@@ -116,12 +130,14 @@ export function collectAndReplaceSyncTransferables<
       }
       return out;
     }
-    // Walk plain objects only. Class instances, codec-tagged objects
-    // (`{@T: 'map', d: [...]}`) etc. pass through — their children
-    // may contain transferables but the codec has already encoded
-    // them (e.g., ArrayBuffer inside a Map → base64 in the codec
-    // output). Only plain-object wrappers around raw transferables
-    // need sentinel substitution.
+    // Walk plain objects and codec-tagged objects only. Non-plain
+    // prototypes (class instances, Map, Set, typed arrays) are left
+    // opaque — consistent with the library's existing walkOutbound
+    // stop rule. In practice, the outbound brand walker already ran
+    // and isTransferable short-circuits before the codec encode hook,
+    // so raw Transferables nested inside opaque containers would have
+    // been collected by the brand walker. The sync walker catches any
+    // that survived as top-level or plain-object-nested values.
     const proto = Object.getPrototypeOf(v);
     if (proto !== null && proto !== Object.prototype) return v;
     const out: Record<string, unknown> = {};

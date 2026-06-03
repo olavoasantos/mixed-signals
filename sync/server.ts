@@ -204,11 +204,19 @@ export function enableSyncServer(
      * instance; this callback is the decoupling seam.
      */
     onClientDead?: (clientId: string) => void;
+    /**
+     * Maximum milliseconds to wait for sidecar transferable values
+     * to arrive after a doorbell containing `@T:'transfer'` sentinels.
+     * If the transferables don't arrive within this window, the batch
+     * fails with per-call error frames. Default: 1000.
+     */
+    sidecarTimeoutMs?: number;
   },
 ): SyncServerTransport {
   const dataSabSize = opts?.dataSabSize ?? DEFAULT_DATA_SAB_BYTES;
   const configuredClientId = opts?.clientId;
   const onClientDead = opts?.onClientDead;
+  const sidecarTimeoutMs = opts?.sidecarTimeoutMs ?? 1000;
 
   // SAB pair + views. Allocated lazily on first `hs-req`; reused on
   // subsequent re-handshakes (see jsdoc above).
@@ -341,23 +349,19 @@ export function enableSyncServer(
     abortActiveBatch();
     requestAccumulator = null;
 
-    // Close any prior sidecar port. A rehandshake means the caller
-    // has a fresh client; the old sidecar channel is dead.
-    if (sidecarPort !== null) {
-      try {
-        sidecarPort.close();
-      } catch (_) {
-        /* port may already be closed */
-      }
-    }
+    // Close any prior sidecar port and clear pending sidecar state.
+    // A rehandshake means the caller has a fresh client; the old
+    // sidecar channel is dead. Using closeSidecarPort() instead of
+    // inline close ensures sidecarResolvers and sidecarBuffer are
+    // cleared — preventing seq-collision with the new client's
+    // reset nextSeq=1 id space.
+    closeSidecarPort();
 
     // Create a fresh sidecar channel for transferable ownership.
-    // The host keeps port1; port2 is transferred to the caller in
-    // a separate `hs-sidecar` message (not embedded in `hs-res`)
-    // because MessagePort is a Transferable that cannot be
-    // structured-cloned — it MUST appear in the postMessage transfer
-    // list. Sending it separately keeps hs-res backward-compatible
-    // with transports that don't propagate ctx.transfer.
+    // The host keeps port1; port2 is embedded in the hs-res envelope
+    // and listed in ctx.transfer so postMessage transfers (not clones)
+    // it. If the transport doesn't support transfer lists, the try/catch
+    // below falls back to hs-res without the sidecar field.
     const sidecarChannel = new MessageChannel();
     sidecarPort = sidecarChannel.port1;
     sidecarPort.start();
@@ -454,8 +458,13 @@ export function enableSyncServer(
     try {
       transport.send(hsRes, {transfer: [sidecarChannel.port2]});
     } catch (_) {
-      // Transport doesn't support transfer lists. Re-send hs-res
-      // without the sidecar port.
+      // Transport doesn't support transfer lists (DOMException:
+      // "found in message but not listed in transferList"). Close
+      // the host-side port since sidecar is unavailable, then
+      // re-send hs-res without the sidecar field. The client will
+      // proceed without sidecar and fail fast if transferable
+      // values are later passed to rpc.wait.
+      closeSidecarPort();
       transport.send({
         __sync: 'hs-res',
         control,
@@ -718,7 +727,7 @@ export function enableSyncServer(
 
       if (!allPresent) {
         // Await remaining transferables with a timeout.
-        const SIDECAR_TIMEOUT_MS = 1000;
+        // Use the configurable timeout from enableSyncServer opts.
         const sidecarDone = await Promise.race([
           new Promise<'ok'>((resolve) => {
             sidecarResolvers.set(seq, {
@@ -729,7 +738,7 @@ export function enableSyncServer(
           new Promise<'timeout'>((resolve) => {
             const timer = setTimeout(
               () => resolve('timeout'),
-              SIDECAR_TIMEOUT_MS,
+              sidecarTimeoutMs,
             );
             (timer as unknown as {unref?: () => void}).unref?.();
           }),

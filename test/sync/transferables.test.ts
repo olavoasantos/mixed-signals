@@ -229,14 +229,15 @@ describe('response-side transferable guardrail', () => {
     await harness.dispose();
   });
 
-  it('throws with a clear message for a root ArrayBuffer return', async () => {
+  it('throws with a clear message and correct error name for a root ArrayBuffer return', async () => {
     const result = await harness.cmd<{
       errorName: string;
       errorMessage: string;
     }>({type: 'response-transferable'});
 
-    // The error surfaces on the caller as a hydrated Error. The message
-    // carries the SyncRPCResponseTransferableError content from the host.
+    // The error name is preserved across the wire via the error frame's
+    // `name` field, so callers can match on `.name` for typed handling.
+    expect(result.errorName).toBe('SyncRPCResponseTransferableError');
     expect(result.errorMessage).toContain('Response-side Transferable values are not yet supported');
     expect(result.errorMessage).toContain('ArrayBuffer');
     expect(result.errorMessage).toContain('(root)');
@@ -248,6 +249,7 @@ describe('response-side transferable guardrail', () => {
       errorMessage: string;
     }>({type: 'response-transferable-nested'});
 
+    expect(result.errorName).toBe('SyncRPCResponseTransferableError');
     expect(result.errorMessage).toContain('Response-side Transferable values are not yet supported');
     expect(result.errorMessage).toContain('buffer');
   });
@@ -259,6 +261,7 @@ describe('response-side transferable guardrail', () => {
     }>({type: 'response-transferable-batch'});
 
     // The batch throws the first error (call index 1).
+    expect(result.errorName).toBe('SyncRPCResponseTransferableError');
     expect(result.errorMessage).toContain('Response-side Transferable values are not yet supported');
     expect(result.errorMessage).toContain('ArrayBuffer');
   });
@@ -269,6 +272,7 @@ describe('response-side transferable guardrail', () => {
       errorMessage: string;
     }>({type: 'response-transferable-deep'});
 
+    expect(result.errorName).toBe('SyncRPCResponseTransferableError');
     expect(result.errorMessage).toContain('Response-side Transferable values are not yet supported');
     expect(result.errorMessage).toContain('a.b.buffer');
   });
