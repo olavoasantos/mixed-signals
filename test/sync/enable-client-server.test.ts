@@ -4,7 +4,7 @@
  * `enableSyncServer` (host side, running on the test's main thread).
  * Validates the full SAB protocol round trip with both production
  * wrappers in the loop — the acceptance criterion the host-issue's
- * summary calls out as "uses M001I003T's caller wrapper".
+ * summary calls out as "uses the production caller wrapper".
  */
 import {Worker} from 'node:worker_threads';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';

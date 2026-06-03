@@ -359,9 +359,9 @@ export class RPCClient {
     // promises stay `consumed=true` with no resolve/reject path —
     // `await` on them hangs forever. Matches the documented contract
     // "every claimed promise is settled".
-    let results: WireMessage[];
+    let timeline: WireMessage[];
     try {
-      results = this.transport.wait(calls, opts);
+      timeline = this.transport.wait(calls, opts);
     } catch (err) {
       const wrapped = err instanceof Error ? err : new Error(String(err));
       for (const {promise} of claimed) {
@@ -381,14 +381,36 @@ export class RPCClient {
         this.transport.decode,
       );
 
+    // Iterate the timeline in order. The timeline
+    // interleaves notification frames (@S, @P, @E, etc.) with
+    // result/error frames. Notifications are dispatched through the
+    // existing handleNotification path so the client's reactive
+    // layer applies signal updates and settles promise handles BEFORE
+    // the batch's own results are observed by user code.
+    //
+    // Results are collected positionally to match claimed promises.
+    const results: WireMessage[] = [];
+    for (const frame of timeline) {
+      if (frame.type === 'notification') {
+        // Dispatch through the same path inbound async notifications
+        // use. This applies @S signal updates, @P/@E promise
+        // settlements, etc.
+        const hydratedParams = (frame.params as unknown[])?.map(hydrate) ?? [];
+        this.handleNotification(frame.method, hydratedParams);
+      } else if (frame.type === 'result' || frame.type === 'error') {
+        results.push(frame);
+      }
+      // Other frame types (e.g. 'call') are silently ignored.
+    }
+
     // Settle every claimed promise first; only then throw the first
     // error. Mirrors `Promise.all` first-error-wins semantics adapted
     // to a batch we already have all responses for. Throwing mid-loop
     // would leave later promises claimed-but-unsettled — `await` on
     // them would hang forever.
-    const out: unknown[] = new Array(results.length);
+    const out: unknown[] = new Array(claimed.length);
     let firstError: Error | undefined;
-    for (let i = 0; i < results.length; i++) {
+    for (let i = 0; i < claimed.length; i++) {
       const r = results[i];
       const {promise} = claimed[i]!;
       if (r?.type === 'result') {

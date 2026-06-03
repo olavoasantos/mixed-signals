@@ -3,7 +3,7 @@
  * targeted (runs on the iframe's main thread), so we drive it from
  * Node via stubbed `Window` and `Worker` surfaces. Full end-to-end
  * browser coverage with real iframes + COI headers lands later via
- * the Playwright harness (deferred to M008 / M001I012T).
+ * the Playwright harness (deferred to a later milestone).
  */
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {SyncRPCIframeBridgeError} from '../../sync/errors.ts';

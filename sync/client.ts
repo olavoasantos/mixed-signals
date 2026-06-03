@@ -4,7 +4,31 @@ import type {
   WireMessage,
 } from '../shared/protocol.ts';
 import {SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
-import {CHUNK_STATE, CTRL, storeCtrl} from './lane.ts';
+import {CHUNK_STATE, CTRL, loadCtrl, storeCtrl} from './lane.ts';
+
+/**
+ * Idle-path frame envelope emitted by `enableSyncServer`.
+ * Distinguished from regular `WireMessage`s and other `SyncControl`
+ * frames by `__sync: 'frame'`.
+ *
+ * @internal
+ */
+interface SyncFrame {
+  __sync: 'frame';
+  seq: number;
+  msg: WireMessage;
+}
+
+function isSyncFrame(data: unknown): data is SyncFrame {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as {__sync?: unknown}).__sync === 'frame' &&
+    typeof (data as {seq?: unknown}).seq === 'number' &&
+    (data as {msg?: unknown}).msg !== null &&
+    typeof (data as {msg?: unknown}).msg === 'object'
+  );
+}
 
 /**
  * Out-of-band sync-transport control frames carried over the base
@@ -108,8 +132,11 @@ export function enableSyncClient(
   let rpcSubscriber:
     | ((data: unknown, ctx?: TransportContext) => void | Promise<void>)
     | undefined;
-  const pending: Array<{data: unknown; ctx: TransportContext | undefined}> =
-    [];
+  const pending: Array<{
+    data: unknown;
+    ctx: TransportContext | undefined;
+    seq?: number;
+  }> = [];
 
   let handshakeResolved = false;
   let handshakeResolve: (() => void) | undefined;
@@ -138,8 +165,39 @@ export function enableSyncClient(
       handshakeResolve?.();
       return;
     }
-    // Non-handshake inbound: route live to the RPCClient if it has
-    // subscribed yet, otherwise buffer.
+
+    // Unwrap idle-path frame envelopes. The host wraps
+    // every idle-path outbound frame as `{__sync: 'frame', seq, msg}`
+    // so the worker can checkpoint which frames it has applied.
+    if (isSyncFrame(msg)) {
+      const inner = msg.msg;
+      const seq = msg.seq;
+      // Dedup: if the timeline replay already advanced CLIENT_APPLIED_SEQ
+      // past this frame's seq, skip it — the worker has already applied
+      // it via the response timeline.
+      if (controlView !== null) {
+        const current = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
+        if (seq <= current) return;
+      }
+      // Deliver the inner WireMessage to the RPCClient.
+      if (rpcSubscriber) {
+        rpcSubscriber(inner, ctx);
+        // Checkpoint AFTER delivery: any subsequent host read of
+        // CLIENT_APPLIED_SEQ is guaranteed to be ≥ the seq of frames
+        // the worker has finished applying.
+        if (controlView !== null) {
+          storeCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ, seq);
+        }
+      } else {
+        // Queued for later drain — don't checkpoint yet; the frame
+        // hasn't been applied to the reactive layer.
+        pending.push({data: inner, ctx, seq});
+      }
+      return;
+    }
+
+    // Non-handshake, non-frame inbound: route live to the RPCClient
+    // if it has subscribed yet, otherwise buffer.
     if (rpcSubscriber) {
       rpcSubscriber(msg, ctx);
     } else {
@@ -181,7 +239,11 @@ export function enableSyncClient(
     }
 
     const seq = nextSeq++;
-    const envelope = {seq, calls};
+    // Snapshot the caller's applied-seq watermark at
+    // envelope-build time. The host uses this to determine which
+    // replay-log frames to prepend to the response timeline.
+    const clientAppliedSeq = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
+    const envelope = {seq, clientAppliedSeq, calls};
     const requestJson = JSON.stringify(envelope);
     const encoded = new TextEncoder().encode(requestJson);
     const totalBytes = encoded.byteLength;
@@ -318,9 +380,32 @@ export function enableSyncClient(
     const responseJson = new TextDecoder().decode(responseAccumulator);
     const response = JSON.parse(responseJson) as {
       seq: number;
-      results: WireMessage[];
+      replayedUpToSeq?: number;
+      timeline?: WireMessage[];
+      results?: WireMessage[];
     };
-    return response.results;
+
+    // Advance CLIENT_APPLIED_SEQ to the replay watermark so the
+    // host doesn't re-replay the same frames on the next wait, and
+    // so the inbound SyncFrame dedup drops the queued postMessages
+    // that carry the same frames.
+    if (
+      response.replayedUpToSeq != null &&
+      response.replayedUpToSeq > 0 &&
+      controlView !== null
+    ) {
+      const current = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
+      if (response.replayedUpToSeq > current) {
+        storeCtrl(
+          controlView,
+          CTRL.CLIENT_APPLIED_SEQ,
+          response.replayedUpToSeq,
+        );
+      }
+    }
+
+    // The response uses the unified `timeline` shape.
+    return response.timeline ?? response.results ?? [];
   }
 
   const wrapper: RawTransport = {
@@ -335,7 +420,19 @@ export function enableSyncClient(
       // routes live in the inbound handler above.
       if (pending.length > 0) {
         const drained = pending.splice(0);
-        for (const item of drained) cb(item.data, item.ctx);
+        for (const item of drained) {
+          cb(item.data, item.ctx);
+          // Bump CLIENT_APPLIED_SEQ on drain for frames that carried
+          // a seq (idle-path SyncFrame envelopes). We deferred the
+          // checkpoint at enqueue time because the frame hadn't been
+          // applied to the reactive layer yet.
+          if (item.seq != null && controlView !== null) {
+            const current = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
+            if (item.seq > current) {
+              storeCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ, item.seq);
+            }
+          }
+        }
       }
     },
     encode: transport.encode,
