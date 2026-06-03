@@ -5,7 +5,7 @@
  * they inspect the encoded byte layout to verify that primitive results
  * use fast-path TYPEs (BOOL, F64, VOID, HANDLE_ID) and NOT JSON.
  * Forcing all frames to JSON would fail these tests — that's the
- * falsifiability check M005I006T requires.
+ * falsifiability check the fast-path design requires.
  *
  * We test by encoding a known timeline via the same functions the
  * server uses, then decoding the byte layout with DataView to verify

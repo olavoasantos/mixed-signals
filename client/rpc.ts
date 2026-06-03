@@ -54,8 +54,8 @@ function detectUnsupportedContext(): {
   // Check order mirrors supportsSync() in sync/support.ts:
   // specific unsupported contexts first, then SAB prerequisite,
   // then COI on the one supported browser context (workers).
-  // M006I002T: "first match wins; main-thread without SAB hits
-  // main-thread check first (more informative message)."
+  // First match wins: main-thread without SAB hits the main-thread
+  // check first (more informative message).
 
   // ServiceWorker — always unsupported, check before the generic
   // WorkerGlobalScope test since SW inherits from it.
