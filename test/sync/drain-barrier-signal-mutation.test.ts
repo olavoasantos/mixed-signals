@@ -7,20 +7,16 @@
  * applied before the result is observable.
  */
 import {signal} from '@preact/signals-core';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it} from 'vitest';
 import {createModel} from '../../server/model.ts';
-import {type Harness, setupHarness} from './_drain-barrier-harness.ts';
+import {MixedSignalsNodeHarness} from '../harness/index.ts';
 
 describe('drain barrier — signal mutation from sync call', () => {
-  let h: Harness | undefined;
-
-  beforeEach(() => {
-    h = undefined;
-  });
+  let harness: MixedSignalsNodeHarness | undefined;
 
   afterEach(async () => {
-    if (h) await h.dispose();
-    h = undefined;
+    if (harness) await harness.terminate();
+    harness = undefined;
   });
 
   it('worker reads correct signal value immediately after rpc.wait when the method mutated it', async () => {
@@ -31,26 +27,37 @@ describe('drain barrier — signal mutation from sync call', () => {
     );
     const server = new ServerModel();
 
-    h = setupHarness({
-      server,
-      mutate() {
-        counter.value = 42;
-        return 'done';
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        server,
+        mutate() {
+          counter.value = 42;
+          return 'done';
+        },
       },
+      sync: true,
+    });
+    await harness.ready;
+
+    // Subscribe to the signal via effect (dynamic import avoids Vite SSR transform)
+    await harness.client.evaluate(`async () => {
+      const {effect} = await import('@preact/signals-core');
+      const c = globalThis.client;
+      globalThis._dispose = effect(() => { c.root.server.counter.value; });
+      await new Promise(r => setTimeout(r, 10));
+    }`);
+
+    // Sync call that mutates the signal — drain barrier should apply
+    // the @S frame before the result is observable
+    const result = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      const [value] = c.wait([c.root.mutate()]);
+      const signalValue = c.root.server.counter.peek();
+      (globalThis as any)._dispose?.();
+      return {value, signalValue};
     });
 
-    const result = await h.cmd<{
-      result: string;
-      signalValue: number;
-      observedCount: number;
-      observed: unknown[];
-    }>({
-      type: 'watch-and-sync-mutate',
-      signalPath: 'server.counter',
-      method: 'mutate',
-    });
-
-    expect(result.result).toBe('done');
+    expect(result.value).toBe('done');
     expect(result.signalValue).toBe(42);
   });
 
@@ -62,26 +69,36 @@ describe('drain barrier — signal mutation from sync call', () => {
     );
     const server = new ServerModel();
 
-    h = setupHarness({
-      server,
-      multiMutate() {
-        counter.value = 10;
-        counter.value = 20;
-        counter.value = 30;
-        return 'multi-done';
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        server,
+        multiMutate() {
+          counter.value = 10;
+          counter.value = 20;
+          counter.value = 30;
+          return 'multi-done';
+        },
       },
+      sync: true,
+    });
+    await harness.ready;
+
+    await harness.client.evaluate(`async () => {
+      const {effect} = await import('@preact/signals-core');
+      const c = globalThis.client;
+      globalThis._dispose = effect(() => { c.root.server.counter.value; });
+      await new Promise(r => setTimeout(r, 10));
+    }`);
+
+    const result = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      const [value] = c.wait([c.root.multiMutate()]);
+      const signalValue = c.root.server.counter.peek();
+      (globalThis as any)._dispose?.();
+      return {value, signalValue};
     });
 
-    const result = await h.cmd<{
-      result: string;
-      signalValue: number;
-    }>({
-      type: 'watch-and-sync-mutate',
-      signalPath: 'server.counter',
-      method: 'multiMutate',
-    });
-
-    expect(result.result).toBe('multi-done');
+    expect(result.value).toBe('multi-done');
     expect(result.signalValue).toBe(30);
   });
 });
