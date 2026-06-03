@@ -3,6 +3,7 @@ import {
   RELEASE_HANDLES_METHOD,
   UNWATCH_SIGNALS_METHOD,
   WATCH_SIGNALS_METHOD,
+  type WireMessage,
 } from '../shared/protocol.ts';
 import {
   type SyncablePromise,
@@ -135,6 +136,68 @@ export class ClientReflection implements HydrateEnv {
     settle: {resolve(v: any): void; reject(e: any): void},
   ): void {
     this.pendingPromises.set(id, settle);
+  }
+
+  /**
+   * Synchronously drain pending @W / @U / @D notification batches into
+   * WireMessage[] entries and cancel the debounce timers. Idempotent:
+   * returns [] when all batches are empty.
+   *
+   * Called by enableSyncClient.wait at envelope-build time so watches
+   * issued just before rpc.wait travel inside the wait envelope as a
+   * prelude rather than waiting for the next debounce window.
+   *
+   * @internal
+   */
+  flushForSyncPrelude(): WireMessage[] {
+    const entries: WireMessage[] = [];
+
+    // @W — watch batch
+    if (this.watchBatch.size > 0) {
+      const ids = Array.from(this.watchBatch);
+      this.watchBatch.clear();
+      entries.push({
+        type: 'notification',
+        method: WATCH_SIGNALS_METHOD,
+        params: ids,
+      });
+    }
+    if (this.watchTimer !== null) {
+      clearTimeout(this.watchTimer);
+      this.watchTimer = null;
+    }
+
+    // @U — unwatch batch
+    if (this.unwatchBatch.size > 0) {
+      const ids = Array.from(this.unwatchBatch);
+      this.unwatchBatch.clear();
+      entries.push({
+        type: 'notification',
+        method: UNWATCH_SIGNALS_METHOD,
+        params: ids,
+      });
+    }
+    if (this.unwatchTimer !== null) {
+      clearTimeout(this.unwatchTimer);
+      this.unwatchTimer = null;
+    }
+
+    // @D — release batch
+    if (this.releaseBatch.size > 0) {
+      const ids = Array.from(this.releaseBatch);
+      this.releaseBatch.clear();
+      entries.push({
+        type: 'notification',
+        method: RELEASE_HANDLES_METHOD,
+        params: ids,
+      });
+    }
+    if (this.releaseTimer !== null) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = null;
+    }
+
+    return entries;
   }
 
   /** @internal — called by the client RPC on @P / @E notifications. */
