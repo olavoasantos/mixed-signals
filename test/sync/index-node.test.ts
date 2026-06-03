@@ -11,10 +11,21 @@ import * as syncBrowser from '../../sync/index.ts';
  * on — a subtle and easy-to-miss bug.
  */
 describe('mixed-signals/sync — Node entry parity with browser entry', () => {
-  it('exposes the same set of runtime export keys', () => {
-    expect(Object.keys(syncNode).sort()).toEqual(
-      Object.keys(syncBrowser).sort(),
-    );
+  // Node-only exports that legitimately differ from the browser surface.
+  const NODE_ONLY_EXPORTS = new Set(['createNodeWorkerBridge']);
+
+  it('exposes every browser export key (superset check)', () => {
+    const browserKeys = Object.keys(syncBrowser).sort();
+    const nodeKeys = Object.keys(syncNode).sort();
+    // Every browser key must also appear in the Node entry.
+    for (const key of browserKeys) {
+      expect(nodeKeys).toContain(key);
+    }
+    // Any extra Node keys must be in the allowlist.
+    const extras = nodeKeys.filter((k) => !browserKeys.includes(k));
+    for (const key of extras) {
+      expect(NODE_ONLY_EXPORTS.has(key)).toBe(true);
+    }
   });
 
   it('shares the error-class identities across entries', () => {

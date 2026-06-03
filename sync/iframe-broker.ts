@@ -1,6 +1,7 @@
 import type {RawTransport, TransportContext} from '../shared/protocol.ts';
 import {SyncRPCIframeBridgeError} from './errors.ts';
 import type {IframeBrokerBridge} from './iframe-bridge.ts';
+import {markCallerDead} from './lifecycle.ts';
 import {enableSyncServer} from './server.ts';
 
 /**
@@ -11,11 +12,8 @@ import {enableSyncServer} from './server.ts';
  */
 type WorkerLike = {
   postMessage(data: unknown, transfer?: readonly unknown[]): void;
-  addEventListener(type: 'message', cb: (event: MessageEvent) => void): void;
-  removeEventListener(
-    type: 'message',
-    cb: (event: MessageEvent) => void,
-  ): void;
+  addEventListener(type: string, cb: (event: any) => void): void;
+  removeEventListener(type: string, cb: (event: any) => void): void;
 };
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -49,10 +47,9 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
  * MUST exceed the P99 of the slowest expected `rpc.wait` round
  * trip. Default 30000 ms matches the project's retention TTL
  * default; lower it only with measured headroom. The
- * `{__sync: 'client_dead'}` frame is also a producer-only signal
- * in M001 — the host wrapper (`enableSyncServer`) silently drops
- * it. The end-to-end teardown protocol lands with a later
- * milestone; until then this hook is detection-only.
+ * `{__sync: 'client_dead'}` notification is processed by
+ * `enableSyncServer`'s `handleClientDead`, which validates
+ * the epoch, deduplicates, and invokes `onClientDead`.
  *
  * The worker still sees a fully synchronous `rpc.wait(...)`. The
  * parent sees only async RPC traffic. The broker absorbs the
@@ -100,6 +97,8 @@ export function createIframeBrokerBridge(opts: {
   dataSabSize?: number;
   /** Heartbeat timeout for detecting blocked-worker death. */
   workerHeartbeatTimeoutMs?: number;
+  /** Stable client identifier for this worker. Random if omitted. */
+  clientId?: string;
 }): IframeBrokerBridge {
   return _createIframeBrokerBridgeInternal(opts);
 }
@@ -117,6 +116,7 @@ export function _createIframeBrokerBridgeInternal(opts: {
   hostTransport: RawTransport;
   dataSabSize?: number;
   workerHeartbeatTimeoutMs?: number;
+  clientId?: string;
   _crossOriginIsolated?: boolean;
 }): IframeBrokerBridge {
   const {
@@ -124,6 +124,7 @@ export function _createIframeBrokerBridgeInternal(opts: {
     hostTransport,
     dataSabSize,
     workerHeartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
+    clientId = crypto.randomUUID(),
     _crossOriginIsolated,
   } = opts;
 
@@ -160,6 +161,13 @@ export function _createIframeBrokerBridgeInternal(opts: {
   };
   worker.addEventListener('message', workerInbound);
 
+  // Captured control SAB. The broker has direct access to it because
+  // it allocated the lane (via enableSyncServer) inside its own agent
+  // cluster. We intercept the hs-res as it flows from the wrapper to
+  // the worker.
+  let capturedControlSab: SharedArrayBuffer | null = null;
+  let capturedEpoch = 0;
+
   const workerSideRaw: RawTransport = {
     mode: 'raw',
     send(data, ctx) {
@@ -179,7 +187,16 @@ export function _createIframeBrokerBridgeInternal(opts: {
   // gets `enableSyncServer`'s full sync semantics — handshake, chunk
   // machine, capture window, doorbell + pull handling. The wrapper
   // is what the broker pipes traffic in and out of.
-  const wrapper = enableSyncServer(workerSideRaw, {dataSabSize});
+  const wrapper = enableSyncServer(workerSideRaw, {
+    dataSabSize,
+    clientId,
+    onClientDead() {
+      // Forward the death notification upstream to the parent.
+      // This fires from enableSyncServer's CALLER_STATE poll
+      // or its client_dead handler — the broker just relays.
+      emitDeath();
+    },
+  });
 
   // ── Piping ────────────────────────────────────────────────────────────
   //
@@ -203,23 +220,65 @@ export function _createIframeBrokerBridgeInternal(opts: {
     wrapper.send(data, ctx);
   });
 
-  // ── Heartbeat ────────────────────────────────────────────────────────
-  //
-  // Same shape as `createIframeRelayBridge`: armed on first worker
-  // message, fires `{__sync: 'client_dead'}` upstream exactly once
-  // if the worker goes silent for longer than the configured
-  // threshold. Full teardown protocol lands in a later milestone.
+  // Intercept the wrapper's outbound traffic to the worker to capture
+  // the hs-res (which carries the control SAB + epoch we need for
+  // markCallerDead).
+  const originalWorkerSend = workerSideRaw.send;
+  workerSideRaw.send = (data, ctx) => {
+    if (
+      data &&
+      typeof data === 'object' &&
+      (data as {__sync?: string}).__sync === 'hs-res'
+    ) {
+      const d = data as {
+        control?: SharedArrayBuffer;
+        epoch?: number;
+      };
+      if (d.control instanceof SharedArrayBuffer) {
+        capturedControlSab = d.control;
+        capturedEpoch = typeof d.epoch === 'number' ? d.epoch : 0;
+      }
+    }
+    originalWorkerSend.call(workerSideRaw, data, ctx);
+  };
+
+  // ── Heartbeat & death detection ──────────────────────────────────────
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let deadEmitted = false;
+
+  function emitDeath(): void {
+    if (disposed || deadEmitted) return;
+    deadEmitted = true;
+    if (capturedControlSab !== null) {
+      markCallerDead({
+        controlSab: capturedControlSab,
+        hostTransport,
+        epoch: capturedEpoch,
+        clientId,
+      });
+    } else {
+      // Pre-handshake death.
+      hostTransport.send({
+        __sync: 'client_dead',
+        epoch: 0,
+        clientId,
+      });
+    }
+  }
+
   function armHeartbeat(): void {
     if (disposed || deadEmitted) return;
     if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(() => {
-      if (disposed || deadEmitted) return;
-      deadEmitted = true;
-      hostTransport.send({__sync: 'client_dead'});
+      emitDeath();
     }, workerHeartbeatTimeoutMs);
   }
+
+  // Worker error/messageerror detection.
+  const onWorkerError = () => emitDeath();
+  const onWorkerMessageError = () => emitDeath();
+  worker.addEventListener('error', onWorkerError);
+  worker.addEventListener('messageerror', onWorkerMessageError);
 
   // ── Inspection façade for `client` ───────────────────────────────────
   //
@@ -227,6 +286,8 @@ export function _createIframeBrokerBridgeInternal(opts: {
   // transport. We expose a thin façade that supports the
   // `RawTransport` shape for debug listeners. `server` is the
   // user-supplied `hostTransport` echoed back unchanged.
+  const facadeCleanups: Array<() => void> = [];
+
   const clientFacade: RawTransport = {
     mode: 'raw',
     send(data, ctx) {
@@ -236,11 +297,13 @@ export function _createIframeBrokerBridgeInternal(opts: {
       worker.postMessage(data, transfer);
     },
     onMessage(cb) {
+      if (disposed) return;
       const wrapped = (event: MessageEvent) => {
         if (disposed) return;
         cb(event.data);
       };
       worker.addEventListener('message', wrapped);
+      facadeCleanups.push(() => worker.removeEventListener('message', wrapped));
     },
   };
 
@@ -249,11 +312,15 @@ export function _createIframeBrokerBridgeInternal(opts: {
       if (disposed) return;
       disposed = true;
       worker.removeEventListener('message', workerInbound);
+      worker.removeEventListener('error', onWorkerError);
+      worker.removeEventListener('messageerror', onWorkerMessageError);
       if (heartbeatTimer !== null) {
         clearTimeout(heartbeatTimer);
         heartbeatTimer = null;
       }
       workerListeners.length = 0;
+      for (const cleanup of facadeCleanups) cleanup();
+      facadeCleanups.length = 0;
     },
     server: hostTransport,
     client: clientFacade,

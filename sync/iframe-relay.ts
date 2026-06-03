@@ -1,6 +1,7 @@
 import type {RawTransport, TransportContext} from '../shared/protocol.ts';
 import {SyncRPCIframeBridgeError} from './errors.ts';
 import type {IframeRelayBridge} from './iframe-bridge.ts';
+import {markCallerDead} from './lifecycle.ts';
 
 /**
  * Minimal `Worker`-shaped surface used by the relay. Extracted as a
@@ -12,11 +13,8 @@ import type {IframeRelayBridge} from './iframe-bridge.ts';
  */
 type WorkerLike = {
   postMessage(data: unknown, transfer?: readonly unknown[]): void;
-  addEventListener(type: 'message', cb: (event: MessageEvent) => void): void;
-  removeEventListener(
-    type: 'message',
-    cb: (event: MessageEvent) => void,
-  ): void;
+  addEventListener(type: string, cb: (event: any) => void): void;
+  removeEventListener(type: string, cb: (event: any) => void): void;
 };
 
 /**
@@ -85,10 +83,9 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
  *   - Worker heartbeat: after the first worker message arrives, a
  *     timer is armed for `workerHeartbeatTimeoutMs` (default
  *     30000 ms). If no further worker message lands within that
- *     window, the relay posts `{__sync: 'client_dead'}` upstream
- *     to the parent exactly once. The full worker-teardown
- *     lifecycle protocol lands in a later milestone; this hook is
- *     the detection point.
+ *     window, the relay calls `markCallerDead` which stores
+ *     `CALLER_STATE = DEAD` in the SAB and sends
+ *     `{__sync: 'client_dead', epoch, clientId}` upstream.
  *
  * **Heartbeat threshold caveat.** A worker blocked in
  * `Atomics.wait` for a sync round-trip is silent on postMessage
@@ -98,10 +95,9 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
  * MUST exceed the P99 of the slowest expected `rpc.wait` round
  * trip. Default 30000 ms matches the project's retention TTL
  * default; lower it only with measured headroom. The
- * `{__sync: 'client_dead'}` frame is also a producer-only signal
- * in M001 — the host wrapper (`enableSyncServer`) silently drops
- * it. The end-to-end teardown protocol lands with a later
- * milestone; until then this hook is detection-only.
+ * `{__sync: 'client_dead'}` notification is processed by
+ * `enableSyncServer`'s `handleClientDead`, which validates
+ * the epoch, deduplicates, and invokes `onClientDead`.
  *
  * **Constructing two relays against the same worker is forbidden.**
  * Worker postMessage events fan out to every attached listener, so
@@ -120,6 +116,8 @@ export function createIframeRelayBridge(opts: {
   parentOrigin: string;
   /** Heartbeat timeout for detecting blocked-worker death. */
   workerHeartbeatTimeoutMs?: number;
+  /** Stable client identifier for this worker. Random if omitted. */
+  clientId?: string;
 }): IframeRelayBridge {
   return _createIframeRelayBridgeInternal(opts);
 }
@@ -136,6 +134,7 @@ export function _createIframeRelayBridgeInternal(opts: {
   worker: WorkerLike;
   parentOrigin: string;
   workerHeartbeatTimeoutMs?: number;
+  clientId?: string;
   _localWindow?: WindowLike;
   _parentWindow?: WindowLike;
 }): IframeRelayBridge {
@@ -143,6 +142,7 @@ export function _createIframeRelayBridgeInternal(opts: {
     worker,
     parentOrigin,
     workerHeartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
+    clientId = crypto.randomUUID(),
     _localWindow,
     _parentWindow,
   } = opts;
@@ -190,6 +190,43 @@ export function _createIframeRelayBridgeInternal(opts: {
 
   let disposed = false;
 
+  // Captured from the hs-res envelope as it passes through the relay.
+  // Needed by markCallerDead to include the epoch in the notification.
+  let capturedControlSab: SharedArrayBuffer | null = null;
+  let capturedEpoch = 0;
+
+  // Host-facing transport for markCallerDead. The relay sends to
+  // the parent via postMessage, so we wrap that in a minimal
+  // RawTransport.
+  const hostFacingTransport: RawTransport = {
+    mode: 'raw',
+    send(data) {
+      parentWindow.postMessage(data, parentOrigin);
+    },
+    onMessage() {},
+  };
+
+  function emitDeath(): void {
+    if (disposed || deadEmitted) return;
+    deadEmitted = true;
+    if (capturedControlSab !== null) {
+      markCallerDead({
+        controlSab: capturedControlSab,
+        hostTransport: hostFacingTransport,
+        epoch: capturedEpoch,
+        clientId,
+      });
+    } else {
+      // Pre-handshake death: no SAB available. Send a best-effort
+      // notification with epoch 0 (the host will reject it).
+      hostFacingTransport.send({
+        __sync: 'client_dead',
+        epoch: 0,
+        clientId,
+      });
+    }
+  }
+
   // Heartbeat state. Armed lazily on the first worker message, so an
   // idle pre-handshake worker isn't declared dead prematurely.
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
@@ -198,11 +235,16 @@ export function _createIframeRelayBridgeInternal(opts: {
     if (disposed || deadEmitted) return;
     if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(() => {
-      if (disposed || deadEmitted) return;
-      deadEmitted = true;
-      parentWindow.postMessage({__sync: 'client_dead'}, parentOrigin);
+      emitDeath();
     }, workerHeartbeatTimeoutMs);
   };
+
+  // Worker error/messageerror detection. These fire when the worker
+  // terminates abnormally or when a message can't be deserialized.
+  const onWorkerError = () => emitDeath();
+  const onWorkerMessageError = () => emitDeath();
+  worker.addEventListener('error', onWorkerError);
+  worker.addEventListener('messageerror', onWorkerMessageError);
 
   // Worker → parent forwarder. Forwards `event.data` verbatim so
   // SABs and transferables pass through untouched.
@@ -220,6 +262,19 @@ export function _createIframeRelayBridgeInternal(opts: {
     if (disposed) return;
     if (event.source !== parentWindow) return;
     if (event.origin !== parentOrigin) return;
+    // Intercept hs-res to capture the control SAB + epoch for
+    // markCallerDead. The relay doesn't consume these — it just
+    // captures them while forwarding.
+    const d = event.data;
+    if (
+      d &&
+      typeof d === 'object' &&
+      d.__sync === 'hs-res' &&
+      d.control instanceof SharedArrayBuffer
+    ) {
+      capturedControlSab = d.control;
+      capturedEpoch = typeof d.epoch === 'number' ? d.epoch : 0;
+    }
     worker.postMessage(event.data);
   };
   localWindow.addEventListener('message', fromParent);
@@ -228,8 +283,9 @@ export function _createIframeRelayBridgeInternal(opts: {
   //
   // Each façade re-uses the underlying postMessage / addEventListener
   // surfaces of the corresponding side. They share state with the
-  // bridge: `dispose()`-ing the bridge also detaches every façade's
-  // listeners by clearing the bridge's own.
+  // bridge: facade listeners are tracked and removed on dispose().
+
+  const facadeCleanups: Array<() => void> = [];
 
   const serverFacade: RawTransport = {
     mode: 'raw',
@@ -240,6 +296,7 @@ export function _createIframeRelayBridgeInternal(opts: {
       parentWindow.postMessage(data, parentOrigin, transfer);
     },
     onMessage(cb) {
+      if (disposed) return;
       const wrapper = (event: MessageEvent) => {
         if (disposed) return;
         if (event.source !== parentWindow) return;
@@ -247,6 +304,7 @@ export function _createIframeRelayBridgeInternal(opts: {
         cb(event.data);
       };
       localWindow.addEventListener('message', wrapper);
+      facadeCleanups.push(() => localWindow.removeEventListener('message', wrapper));
     },
   };
 
@@ -259,11 +317,13 @@ export function _createIframeRelayBridgeInternal(opts: {
       worker.postMessage(data, transfer);
     },
     onMessage(cb) {
+      if (disposed) return;
       const wrapper = (event: MessageEvent) => {
         if (disposed) return;
         cb(event.data);
       };
       worker.addEventListener('message', wrapper);
+      facadeCleanups.push(() => worker.removeEventListener('message', wrapper));
     },
   };
 
@@ -272,11 +332,15 @@ export function _createIframeRelayBridgeInternal(opts: {
       if (disposed) return;
       disposed = true;
       worker.removeEventListener('message', fromWorker);
+      worker.removeEventListener('error', onWorkerError);
+      worker.removeEventListener('messageerror', onWorkerMessageError);
       localWindow.removeEventListener('message', fromParent);
       if (heartbeatTimer !== null) {
         clearTimeout(heartbeatTimer);
         heartbeatTimer = null;
       }
+      for (const cleanup of facadeCleanups) cleanup();
+      facadeCleanups.length = 0;
     },
     server: serverFacade,
     client: clientFacade,

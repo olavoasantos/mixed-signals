@@ -46,9 +46,14 @@ type SyncControl =
   | {__sync: 'doorbell'; seq: number}
   | {__sync: 'pull'; seq: number};
 
-function isHandshakeRes(
-  data: unknown,
-): data is Extract<SyncControl, {__sync: 'hs-res'}> {
+interface HandshakeRes {
+  __sync: 'hs-res';
+  control: SharedArrayBuffer;
+  data: SharedArrayBuffer;
+  epoch?: number;
+}
+
+function isHandshakeRes(data: unknown): data is HandshakeRes {
   return (
     typeof data === 'object' &&
     data !== null &&
@@ -280,7 +285,7 @@ export function enableSyncClient(
         // to read once. The host doesn't `Atomics.wait` on
         // REQUEST_SEQ (it can't from a main thread), but the notify
         // is kept for symmetry and future use (drain barrier in
-        // M002+ may consume the SEQ slot).
+        // the drain barrier may consume the SEQ slot).
         storeCtrl(controlView, CTRL.BATCH_SIZE, calls.length);
         storeCtrl(controlView, CTRL.REQUEST_SEQ, seq);
         Atomics.notify(controlView, CTRL.REQUEST_SEQ);

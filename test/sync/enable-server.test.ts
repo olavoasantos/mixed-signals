@@ -376,7 +376,7 @@ describe('enableSyncServer', () => {
   });
 
   it('notifications during the capture window are captured into the timeline (not forwarded to base)', async () => {
-    // M002: notifications emitted during an active sync batch are
+    // Notifications emitted during an active sync batch are
     // captured into the response timeline so the caller's reactive
     // layer applies them synchronously before the result is observed.
     // They should NOT appear on the base transport.
@@ -461,17 +461,17 @@ describe('enableSyncServer', () => {
     await new Promise((r) => setTimeout(r, 100));
 
     // The slow call's `result` frame (id=1) must appear on the base —
-    // it's an async response, not part of the sync batch. With M002,
+    // it's an async response, not part of the sync batch. With the drain barrier,
     // idle-path frames are wrapped in `{__sync: 'frame', seq, msg}`.
     const sawAsyncResult = h.baseSent.some((m) => {
       if (m === null || typeof m !== 'object') return false;
-      // Direct result (pre-M002 or pre-handshake)
+      // Direct result (pre-handshake)
       if (
         (m as {type?: string}).type === 'result' &&
         (m as {id?: number}).id === 1
       )
         return true;
-      // Wrapped result (M002 idle-path)
+      // Wrapped result (Idle-path)
       const sync = m as {__sync?: string; msg?: {type?: string; id?: number}};
       if (
         sync.__sync === 'frame' &&
