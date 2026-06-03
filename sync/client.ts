@@ -3,7 +3,9 @@ import type {
   TransportContext,
   WireMessage,
 } from '../shared/protocol.ts';
+import {HANDLE_MARKER} from '../shared/protocol.ts';
 import {SyncRPCError, SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
+import {decodeHeader, WIRE_TYPE} from './header.ts';
 import {CHUNK_STATE, CTRL, loadCtrl, storeCtrl} from './lane.ts';
 import {
   collectAndReplaceSyncTransferables,
@@ -466,35 +468,30 @@ export function enableSyncClient(
       // 'ok' or 'not-equal' — re-read CHUNK_STATE and loop.
     }
 
-    const responseJson = new TextDecoder().decode(responseAccumulator);
-    const response = JSON.parse(responseJson) as {
-      seq: number;
-      replayedUpToSeq?: number;
-      timeline?: WireMessage[];
-      results?: WireMessage[];
-    };
+    // ── Decode binary response ────────────────────────────────────
+    const {replayedUpToSeq, timeline} =
+      decodeResponseTimeline(responseAccumulator);
 
     // Advance CLIENT_APPLIED_SEQ to the replay watermark so the
     // host doesn't re-replay the same frames on the next wait, and
     // so the inbound SyncFrame dedup drops the queued postMessages
     // that carry the same frames.
     if (
-      response.replayedUpToSeq != null &&
-      response.replayedUpToSeq > 0 &&
+      replayedUpToSeq != null &&
+      replayedUpToSeq > 0 &&
       controlView !== null
     ) {
       const current = loadCtrl(controlView, CTRL.CLIENT_APPLIED_SEQ);
-      if (response.replayedUpToSeq > current) {
+      if (replayedUpToSeq > current) {
         storeCtrl(
           controlView,
           CTRL.CLIENT_APPLIED_SEQ,
-          response.replayedUpToSeq,
+          replayedUpToSeq,
         );
       }
     }
 
-    // The response uses the unified `timeline` shape.
-    return response.timeline ?? response.results ?? [];
+    return timeline;
   }
 
   const wrapper: RawTransport = {
@@ -531,4 +528,107 @@ export function enableSyncClient(
   };
 
   return handshake.then(() => wrapper);
+}
+
+// ── Response timeline binary decoder ─────────────────────────────────────
+
+const textDecoder = new TextDecoder();
+
+/**
+ * Decode a binary response buffer into the preamble fields and a
+ * `WireMessage[]` timeline. The binary layout is:
+ *
+ *   [SEQ: Int32] [REPLAYED_UP_TO_SEQ: Int32] [COUNT: Int32] [records...]
+ *
+ * Each record is decoded via `decodeHeader`. TYPE-enum fast-path
+ * records reconstruct `WireMessage` objects directly from header
+ * fields — no `JSON.parse`. TYPE=JSON records fall through to
+ * standard `JSON.parse`.
+ *
+ * Result frames from fast-path records get a synthetic `id` of 0
+ * — the timeline dispatcher in RPCClient.wait correlates results
+ * positionally, not by id.
+ */
+function decodeResponseTimeline(buf: Uint8Array): {
+  seq: number;
+  replayedUpToSeq: number;
+  timeline: WireMessage[];
+} {
+  const PREAMBLE_SIZE = 12;
+  if (buf.byteLength < PREAMBLE_SIZE) {
+    throw new SyncRPCError(
+      `decodeResponseTimeline: buffer too small (${buf.byteLength} bytes, need at least ${PREAMBLE_SIZE})`,
+    );
+  }
+
+  // Copy to a non-shared buffer for DataView compatibility in
+  // browsers that reject SAB-backed views in TextDecoder.
+  const local = buf.slice(0);
+  const preambleView = new DataView(local.buffer, local.byteOffset, PREAMBLE_SIZE);
+  const seq = preambleView.getInt32(0, true);
+  const replayedUpToSeq = preambleView.getInt32(4, true);
+  const count = preambleView.getInt32(8, true);
+
+  if (count === 0) {
+    return {seq, replayedUpToSeq, timeline: []};
+  }
+
+  const timeline: WireMessage[] = [];
+  let offset = PREAMBLE_SIZE;
+
+  for (let i = 0; i < count; i++) {
+    const header = decodeHeader(local, offset);
+    offset += header.totalSize;
+
+    switch (header.type) {
+      case WIRE_TYPE.VOID:
+        timeline.push({type: 'result', id: 0, value: undefined});
+        break;
+
+      case WIRE_TYPE.BOOL:
+        timeline.push({
+          type: 'result',
+          id: 0,
+          value: header.inlineVal === 1,
+        });
+        break;
+
+      case WIRE_TYPE.F64:
+        timeline.push({
+          type: 'result',
+          id: 0,
+          value: header.inlineVal,
+        });
+        break;
+
+      case WIRE_TYPE.HANDLE_ID: {
+        // Kind prefix byte is in payload (LEN=1); numeric id in INLINE_VAL.
+        const kindCode = header.bytes.length > 0 ? header.bytes[0]! : 111; // 'o'
+        const kind = String.fromCharCode(kindCode);
+        const marker = `${kind}${header.inlineVal}`;
+        timeline.push({
+          type: 'result',
+          id: 0,
+          value: {[HANDLE_MARKER]: marker},
+        });
+        break;
+      }
+
+      case WIRE_TYPE.JSON: {
+        // JSON fallback: decode the full WireMessage from JSON bytes.
+        const jsonStr = textDecoder.decode(header.bytes);
+        const parsed = JSON.parse(jsonStr) as WireMessage;
+        timeline.push(parsed);
+        break;
+      }
+
+      default:
+        throw new SyncRPCError(
+          `decodeResponseTimeline: unknown TYPE=${header.type} at record ${i} ` +
+            `(offset ${offset - header.totalSize}). Possible wire protocol version mismatch.`,
+        );
+    }
+  }
+
+  return {seq, replayedUpToSeq, timeline};
 }

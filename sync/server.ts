@@ -3,6 +3,7 @@ import type {
   TransportContext,
   WireMessage,
 } from '../shared/protocol.ts';
+import {HANDLE_MARKER} from '../shared/protocol.ts';
 import {
   allocateLane,
   CALLER_STATE,
@@ -12,6 +13,7 @@ import {
   loadCtrl,
   storeCtrl,
 } from './lane.ts';
+import {encodeHeader, HEADER_SIZE, WIRE_TYPE} from './header.ts';
 import {SyncRPCResponseTransferableError} from './errors.ts';
 import {ReplayLog} from './replay-log.ts';
 import {
@@ -891,8 +893,11 @@ export function enableSyncServer(
       replayLog.dropUpTo(clientAppliedSeq);
     }
 
-    const responseJson = JSON.stringify({seq, replayedUpToSeq, timeline});
-    const encoded = new TextEncoder().encode(responseJson);
+    // ── Encode response as record-count-prefixed binary ──────────
+    // Each frame is encoded as a per-call header record. Primitive
+    // result terminals use the TYPE-enum fast path (no JSON); all
+    // others fall back to TYPE=JSON.
+    const encoded = encodeResponseTimeline(seq, replayedUpToSeq, timeline);
 
     // Publish RESPONSE_SEQ — informational. The caller's wake signal
     // is `CHUNK_STATE = DONE_RES` on the final chunk; bumping
@@ -1086,4 +1091,139 @@ export function enableSyncServer(
   };
 
   return syncWrapper;
+}
+
+// ── Response timeline binary encoder ─────────────────────────────────────
+
+/**
+ * Detect whether a result value qualifies for the HANDLE_ID fast path:
+ * a plain object with exactly one key `@H` whose value is a string
+ * starting with a handle-kind prefix (o/f/s/p) followed by digits.
+ *
+ * @returns The parsed kind character and numeric id, or null.
+ */
+function parseHandleIdMarker(
+  value: unknown,
+): {kind: string; numericId: number} | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== HANDLE_MARKER) return null;
+  const marker = (value as Record<string, unknown>)[HANDLE_MARKER];
+  if (typeof marker !== 'string' || marker.length < 2) return null;
+  const kind = marker[0]!;
+  if (kind !== 'o' && kind !== 'f' && kind !== 's' && kind !== 'p') {
+    return null;
+  }
+  const numStr = marker.slice(1);
+  const numericId = Number(numStr);
+  if (!Number.isFinite(numericId) || numericId < 0) return null;
+  return {kind, numericId};
+}
+
+const textEncoder = new TextEncoder();
+
+/**
+ * Encode the response timeline as a binary buffer with record-count-
+ * prefixed per-call header records. The layout is:
+ *
+ *   [SEQ: Int32] [REPLAYED_UP_TO_SEQ: Int32] [COUNT: Int32] [records...]
+ *
+ * where each record is [TYPE, LEN, INLINE_VAL, bytes...] per the
+ * header module.
+ *
+ * TYPE selection per frame:
+ * - result with value === undefined: VOID
+ * - result with typeof value === 'boolean': BOOL (INLINE_VAL 0|1)
+ * - result with typeof value === 'number' && isFinite: F64
+ * - result with single @H marker: HANDLE_ID (kind byte in payload)
+ * - everything else: JSON
+ */
+function encodeResponseTimeline(
+  seq: number,
+  replayedUpToSeq: number,
+  timeline: WireMessage[],
+): Uint8Array {
+  // Pre-scan: classify each frame and compute total buffer size.
+  const PREAMBLE_SIZE = 12; // seq(4) + replayedUpToSeq(4) + count(4)
+  const records: Array<{
+    type: number;
+    inlineVal: number;
+    payload: Uint8Array | undefined;
+  }> = [];
+
+  let totalPayloadBytes = 0;
+  for (const frame of timeline) {
+    const rec = classifyFrame(frame);
+    records.push(rec);
+    totalPayloadBytes += rec.payload ? rec.payload.byteLength : 0;
+  }
+
+  const totalSize =
+    PREAMBLE_SIZE + records.length * HEADER_SIZE + totalPayloadBytes;
+  const buf = new Uint8Array(totalSize);
+  const preambleView = new DataView(buf.buffer, 0, PREAMBLE_SIZE);
+  preambleView.setInt32(0, seq, true);
+  preambleView.setInt32(4, replayedUpToSeq, true);
+  preambleView.setInt32(8, records.length, true);
+
+  let offset = PREAMBLE_SIZE;
+  for (const rec of records) {
+    offset += encodeHeader(
+      buf,
+      offset,
+      rec.type,
+      rec.inlineVal,
+      rec.payload,
+    );
+  }
+
+  return buf;
+}
+
+function classifyFrame(frame: WireMessage): {
+  type: number;
+  inlineVal: number;
+  payload: Uint8Array | undefined;
+} {
+  if (frame.type === 'result') {
+    const {value} = frame;
+
+    // VOID: undefined result
+    if (value === undefined) {
+      return {type: WIRE_TYPE.VOID, inlineVal: 0, payload: undefined};
+    }
+
+    // BOOL: boolean result
+    if (typeof value === 'boolean') {
+      return {
+        type: WIRE_TYPE.BOOL,
+        inlineVal: value ? 1 : 0,
+        payload: undefined,
+      };
+    }
+
+    // F64: finite number result (NaN, Infinity, -Infinity → JSON)
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return {type: WIRE_TYPE.F64, inlineVal: value, payload: undefined};
+    }
+
+    // HANDLE_ID: single @H marker
+    const handle = parseHandleIdMarker(value);
+    if (handle !== null) {
+      // Kind prefix byte in payload (LEN=1); numeric id in INLINE_VAL.
+      const kindByte = new Uint8Array(1);
+      kindByte[0] = handle.kind.charCodeAt(0);
+      return {
+        type: WIRE_TYPE.HANDLE_ID,
+        inlineVal: handle.numericId,
+        payload: kindByte,
+      };
+    }
+  }
+
+  // JSON fallback: encode the full WireMessage as JSON bytes.
+  const jsonBytes = textEncoder.encode(JSON.stringify(frame));
+  return {type: WIRE_TYPE.JSON, inlineVal: 0, payload: jsonBytes};
 }

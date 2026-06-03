@@ -20,7 +20,8 @@
  */
 import {parentPort} from 'node:worker_threads';
 import {CHUNK_STATE, CTRL, storeCtrl} from '../../sync/lane.ts';
-import type {WireMessage} from '../../shared/protocol.ts';
+import {HANDLE_MARKER, type WireMessage} from '../../shared/protocol.ts';
+import {decodeHeader, WIRE_TYPE} from '../../sync/header.ts';
 
 if (!parentPort) {
   throw new Error('_caller-fixture must run inside a Node Worker');
@@ -344,16 +345,49 @@ function runWait(
     // 'ok' or 'not-equal' — re-read CHUNK_STATE.
   }
 
-  const responseJson = new TextDecoder().decode(responseAccumulator);
-  const response = JSON.parse(responseJson) as {
-    seq: number;
-    timeline?: WireMessage[];
-    results?: WireMessage[];
-  };
-  // Unified timeline format. Extract result/error frames
-  // positionally, dropping notification frames (which this low-level
-  // fixture doesn't process).
-  const all = response.timeline ?? response.results ?? [];
+  // Decode binary response: [SEQ: Int32] [REPLAYED_UP_TO_SEQ: Int32]
+  // [COUNT: Int32] [records...]
+  const local = responseAccumulator.slice(0);
+  const preambleView = new DataView(local.buffer, local.byteOffset, 12);
+  // const _seq = preambleView.getInt32(0, true);
+  // const _replayedUpToSeq = preambleView.getInt32(4, true);
+  const count = preambleView.getInt32(8, true);
+
+  const all: WireMessage[] = [];
+  let readOffset = 12;
+  const textDecoder = new TextDecoder();
+  for (let i = 0; i < count; i++) {
+    const header = decodeHeader(local, readOffset);
+    readOffset += header.totalSize;
+
+    switch (header.type) {
+      case WIRE_TYPE.VOID:
+        all.push({type: 'result', id: 0, value: undefined});
+        break;
+      case WIRE_TYPE.BOOL:
+        all.push({type: 'result', id: 0, value: header.inlineVal === 1});
+        break;
+      case WIRE_TYPE.F64:
+        all.push({type: 'result', id: 0, value: header.inlineVal});
+        break;
+      case WIRE_TYPE.HANDLE_ID: {
+        const kindCode = header.bytes.length > 0 ? header.bytes[0]! : 111;
+        const kind = String.fromCharCode(kindCode);
+        const marker = `${kind}${header.inlineVal}`;
+        all.push({type: 'result', id: 0, value: {[HANDLE_MARKER]: marker}});
+        break;
+      }
+      case WIRE_TYPE.JSON: {
+        const parsed = JSON.parse(textDecoder.decode(header.bytes)) as WireMessage;
+        all.push(parsed);
+        break;
+      }
+      default:
+        throw new Error(`Unknown WIRE_TYPE ${header.type}`);
+    }
+  }
+  // Extract result/error frames positionally, dropping notification
+  // frames (which this low-level fixture doesn't process).
   return all.filter(
     (m) => m.type === 'result' || m.type === 'error',
   );
