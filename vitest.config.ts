@@ -9,7 +9,7 @@ export default defineConfig({
       'node_modules/**',
       // Browser harness tests require Playwright browsers to be
       // installed (`npx playwright install chromium`). Run them
-      // explicitly via `pnpm vitest run test/harness/browser-*.test.ts`.
+      // via: pnpm vitest run --config vitest.browser-harness.config.ts
       'test/harness/browser-*.test.ts',
     ],
     // Disabled in anticipation of future `worker_threads`-based sync

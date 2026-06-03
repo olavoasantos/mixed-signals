@@ -347,6 +347,9 @@ export class BrowserTestHarness implements TestHarness {
       if (hasWorker) return;
       await new Promise((r) => setTimeout(r, 50));
     }
+    throw new Error(
+      "_waitForWorker timed out after 5000ms: __worker__ never appeared in frame",
+    );
   }
 
   async terminate(): Promise<void> {

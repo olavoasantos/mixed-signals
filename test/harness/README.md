@@ -246,3 +246,23 @@ test/harness/
 │   └── browser-worker-rpc-client.ts
 └── __fixtures__/               Test-only entry scripts
 ```
+
+## Known Limitations
+
+- **No transfer-list support.** `TestHarnessEnv.postMessage()` does not
+  accept a transfer list. The `enableSyncServer` sidecar `MessagePort`
+  falls back to the no-sidecar path (via the server's built-in
+  try/catch). Tests that need `Transferable` ownership transfer
+  (ArrayBuffer, MessagePort) should use a custom fixture with direct
+  `worker.postMessage(data, transferList)` calls.
+
+- **Browser `evaluate()` string semantics differ from Node.** In Node
+  workers, string arguments are wrapped as `(${code})(...args)` via
+  `new Function`. In browser envs, strings are evaluated as expressions
+  via `frame.evaluate()`. String templates that rely on the
+  function-call wrapping (e.g., `'(arg) => { ... }'`) will behave
+  differently in browser environments.
+
+- **Browser harness tests require Playwright.** Install browsers with
+  `npx playwright install chromium`, then run via the dedicated config:
+  `pnpm vitest run --config vitest.browser-harness.config.ts`

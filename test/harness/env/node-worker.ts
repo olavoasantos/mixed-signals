@@ -45,10 +45,16 @@ export class NodeWorkerEnv implements TestHarnessEnv {
     // Ready when the worker signals on parentPort
     this.ready = new Promise<void>((resolveReady, reject) => {
       const onMessage = (data: unknown) => {
-        if (data && typeof data === "object" && (data as any).__type__ === "ready") {
-          this._worker.off("message", onMessage);
-          this._worker.off("error", onError);
-          resolveReady();
+        if (data && typeof data === "object") {
+          if ((data as any).__type__ === "ready") {
+            this._worker.off("message", onMessage);
+            this._worker.off("error", onError);
+            resolveReady();
+          } else if ((data as any).__type__ === "error") {
+            this._worker.off("message", onMessage);
+            this._worker.off("error", onError);
+            reject(new Error((data as any).error ?? "Worker entry failed"));
+          }
         }
       };
       const onError = (err: Error) => {

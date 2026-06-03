@@ -61,8 +61,8 @@ parentPort.on('message', (data: unknown) => {
 
     parentPort!.postMessage({__type__: 'ready'});
   } catch (err: any) {
-    // Signal fatal error so the harness doesn't hang waiting for ready.
-    parentPort!.postMessage({__type__: 'ready'});
-    throw err;
+    // Signal fatal error so the harness rejects ready instead of hanging.
+    const msg = err instanceof Error ? err.message : String(err);
+    parentPort!.postMessage({__type__: 'error', error: msg});
   }
 })();
