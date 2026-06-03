@@ -14,7 +14,7 @@ import {
   storeCtrl,
 } from './lane.ts';
 import {encodeHeader, HEADER_SIZE, WIRE_TYPE} from './header.ts';
-import {SyncRPCResponseTransferableError} from './errors.ts';
+import {SyncRPCReentrancyError, SyncRPCResponseTransferableError} from './errors.ts';
 import {ReplayLog} from './replay-log.ts';
 import {
   collectExpectedTransferIds,
@@ -1032,6 +1032,19 @@ export function enableSyncServer(
       const batch = activeBatch;
       if (batch !== null && !batch.aborted) {
         const msg = payload as WireMessage;
+        // Reentrancy guard: reject call-type frames to a sync-blocked client.
+        // A method dispatched during a sync batch that tries to invoke a
+        // function handle on the same (blocked) client would deadlock —
+        // the client is in Atomics.wait and can't respond. Throw
+        // synchronously so the host-side invocation path surfaces the error.
+        if (msg && msg.type === 'call') {
+          throw new SyncRPCReentrancyError(
+            'A method dispatched during a sync call tried to invoke a function on the ' +
+            'sync-blocked client. This would deadlock — the client is in Atomics.wait ' +
+            'and cannot process inbound calls. Restructure the host method to avoid ' +
+            'calling back into the sync-blocked client during dispatch.',
+          );
+        }
         if (
           msg &&
           (msg.type === 'result' || msg.type === 'error') &&

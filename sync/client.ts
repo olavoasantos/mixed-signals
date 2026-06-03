@@ -4,7 +4,7 @@ import type {
   WireMessage,
 } from '../shared/protocol.ts';
 import {HANDLE_MARKER} from '../shared/protocol.ts';
-import {SyncRPCError, SyncRPCIframeBridgeError, SyncRPCTimeoutError} from './errors.ts';
+import {SyncRPCError, SyncRPCIframeBridgeError, SyncRPCTimeoutError, SyncRPCUnsupportedContextError} from './errors.ts';
 import {decodeHeader, WIRE_TYPE} from './header.ts';
 import {CHUNK_STATE, CTRL, loadCtrl, storeCtrl} from './lane.ts';
 import {
@@ -261,6 +261,23 @@ export function enableSyncClient(
     calls: WireMessage[],
     waitOpts?: {timeoutMs?: number; flushPrelude?: () => WireMessage[]},
   ): WireMessage[] {
+    // ── Atomics.wait probe ───────────────────────────────────────────
+    // Detect contexts where Atomics.wait is forbidden at call time
+    // (e.g. Node main thread). The RPCClient gate checks handle
+    // browser contexts precisely, but can't import node:worker_threads
+    // to detect Node main thread. This zero-timeout probe catches it:
+    // Atomics.wait returns 'not-equal' or 'timed-out' in a valid
+    // worker and throws TypeError on any main thread.
+    try {
+      Atomics.wait(controlView, CTRL.LANE_VERSION, 0, 0);
+    } catch {
+      throw new SyncRPCUnsupportedContextError(
+        'rpc.wait() cannot be called from the Node main thread. ' +
+          'Atomics.wait is forbidden on the main thread. ' +
+          'Call rpc.wait() from a worker_threads Worker instead.',
+      );
+    }
+
     if (waitOpts?.timeoutMs != null) {
       const t = waitOpts.timeoutMs;
       if (!Number.isFinite(t) || t <= 0 || !Number.isInteger(t)) {

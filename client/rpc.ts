@@ -16,6 +16,7 @@ import {
 import {
   SyncRPCAlreadyWaitedError,
   SyncRPCNoTransportWaitError,
+  SyncRPCNotCrossOriginIsolatedError,
   SyncRPCUnsupportedContextError,
 } from '../sync/errors.ts';
 import {
@@ -61,6 +62,92 @@ function canCallAtomicsWaitInThisContext(): boolean {
   // Non-browser context (Node, Deno, Bun, etc.). Assume usable; runtime
   // guard catches misuse from a non-worker context.
   return true;
+}
+
+/**
+ * Detect the specific unsupported-context condition at `rpc.wait()` entry
+ * and return a reason string. Returns `null` when the context is
+ * supported (a worker with SAB + Atomics available).
+ *
+ * The check order implements the documented gate sequence:
+ *   1. (transport.wait — checked separately before this function)
+ *   2. Browser worker without COI → 'not-coi'
+ *   3. No SAB / Atomics → 'no-sab'
+ *   4. Browser main thread → 'main-thread'
+ *   5. ServiceWorker → 'service-worker'
+ *   6. Non-browser (Node etc.) → null (optimistic; the sync transport's
+ *      wait() probe catches Node main thread at call time)
+ *
+ * @internal
+ */
+function detectUnsupportedContext(): {
+  kind: 'not-coi' | 'no-sab' | 'main-thread' | 'service-worker';
+  message: string;
+} | null {
+  const g = globalThis as unknown as Record<string, unknown>;
+
+  // Browser worker context: check COI BEFORE checking SAB availability.
+  // A non-COI worker may still have SAB/Atomics in some configs, but
+  // sync requires COI for the SAB transfer to succeed.
+  const isBrowserWorker = typeof g.WorkerGlobalScope !== 'undefined';
+  if (isBrowserWorker) {
+    if (
+      'crossOriginIsolated' in g &&
+      (g as {crossOriginIsolated: unknown}).crossOriginIsolated !== true
+    ) {
+      return {
+        kind: 'not-coi',
+        message:
+          'rpc.wait() requires cross-origin isolation. ' +
+          'Configure COOP `same-origin` + COEP `require-corp` on every ' +
+          'context in the chain (page, iframe, worker).',
+      };
+    }
+    // Browser worker with COI: SAB + Atomics should be available.
+    // Fall through to the SAB check as a defensive measure.
+  }
+
+  // SAB / Atomics availability.
+  if (
+    typeof SharedArrayBuffer === 'undefined' ||
+    typeof Atomics === 'undefined'
+  ) {
+    return {
+      kind: 'no-sab',
+      message:
+        'rpc.wait() requires SharedArrayBuffer and Atomics. ' +
+        'Enable cross-origin isolation (COOP + COEP headers) or ' +
+        'use a runtime that supports SharedArrayBuffer.',
+    };
+  }
+
+  // Browser main thread.
+  if (typeof g.window !== 'undefined' && g.window === g) {
+    return {
+      kind: 'main-thread',
+      message:
+        'rpc.wait() cannot be called from the browser main thread. ' +
+        'Atomics.wait is forbidden on the main thread. ' +
+        'Call rpc.wait() from a DedicatedWorker or SharedWorker instead.',
+    };
+  }
+
+  // ServiceWorker.
+  if (typeof g.ServiceWorkerGlobalScope !== 'undefined') {
+    return {
+      kind: 'service-worker',
+      message:
+        'rpc.wait() cannot be called from a ServiceWorker. ' +
+        'ServiceWorkers cannot use Atomics.wait. ' +
+        'Call rpc.wait() from a DedicatedWorker or SharedWorker instead.',
+    };
+  }
+
+  // Non-browser context (Node, Deno, Bun). We cannot detect Node main
+  // thread here without importing `node:worker_threads`. The sync
+  // transport's wait() method probes Atomics.wait at call time and
+  // converts the TypeError into SyncRPCUnsupportedContextError.
+  return null;
 }
 
 /**
@@ -257,18 +344,17 @@ export class RPCClient {
    *   Raised by `enableSyncClient`'s handshake path and surfaced
    *   through `rpc.wait` when the transport is built with the
    *   broker / relay helpers.
+   * @throws SyncRPCNotCrossOriginIsolatedError — the browser worker
+   *   context is not cross-origin isolated. Configure COOP
+   *   `same-origin` + COEP `require-corp` on every document in the
+   *   chain.
    * @throws SyncRPCUnsupportedContextError — the calling context
    *   cannot run `Atomics.wait` (browser main thread, ServiceWorker,
-   *   or any context without `SharedArrayBuffer` / `Atomics`).
-   *   This class is reserved for explicit pre-flight checks and the
-   *   reentrancy throw site that future milestones wire; the actual
-   *   `Atomics.wait` rejection from a main-thread caller surfaces
-   *   as the JS engine's `TypeError` until then.
+   *   Node main thread, or any context without `SharedArrayBuffer`
+   *   / `Atomics`). The message names the specific context.
    * @throws SyncRPCReentrancyError — a method invoked on a sync-
    *   blocked client tried to call back into the same client, which
-   *   would deadlock. The reentrancy throw site is wired in a later
-   *   milestone; the class is declared here for forward
-   *   compatibility of `instanceof` checks.
+   *   would deadlock.
    * @throws RangeError — `promises` is empty; an empty wait is a
    *   programmer error.
    */
@@ -284,18 +370,17 @@ export class RPCClient {
           'client with a sync-capable transport (see mixed-signals/sync).',
       );
     }
-    if (!canCallAtomicsWaitInThisContext()) {
-      // Surface the documented `@throws SyncRPCUnsupportedContextError`
-      // ahead of the engine's `TypeError` from a main-thread
-      // `Atomics.wait`. A caller catching `SyncRPCError` (the family
-      // root) gets a typed error to handle; without this gate the
-      // failure surfaces as an untyped `TypeError`.
-      throw new SyncRPCUnsupportedContextError(
-        'rpc.wait(): the current context cannot call Atomics.wait. ' +
-          'Sync RPC requires a worker context with SharedArrayBuffer; ' +
-          'browser main threads, ServiceWorkers, and non-COI contexts ' +
-          'are not supported.',
-      );
+    // Gate checks 2 + 3: COI and unsupported-context detection.
+    // Checks run in documented order — COI first (browser-specific),
+    // then broader context checks. Node main thread slips through
+    // here (can't import node:worker_threads) but is caught by the
+    // sync transport's Atomics.wait probe at call time.
+    const unsupported = detectUnsupportedContext();
+    if (unsupported !== null) {
+      if (unsupported.kind === 'not-coi') {
+        throw new SyncRPCNotCrossOriginIsolatedError(unsupported.message);
+      }
+      throw new SyncRPCUnsupportedContextError(unsupported.message);
     }
     if (promises.length === 0) {
       throw new RangeError(
