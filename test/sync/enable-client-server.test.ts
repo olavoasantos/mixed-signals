@@ -6,164 +6,96 @@
  * wrappers in the loop — the acceptance criterion the host-issue's
  * summary calls out as "uses the production caller wrapper".
  */
-import {Worker} from 'node:worker_threads';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it} from 'vitest';
+import {resolve, dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {NodeTestHarness, createRawTransport} from '../harness/index.ts';
 import {RPC} from '../../server/rpc.ts';
-import type {
-  RawTransport,
-  TransportContext,
-  WireMessage,
-} from '../../shared/protocol.ts';
-import {MIN_DATA_SAB_BYTES} from '../../sync/lane.ts';
 import {enableSyncServer} from '../../sync/server.ts';
+import {MIN_DATA_SAB_BYTES} from '../../sync/lane.ts';
 
-const WORKER_URL = new URL('./_real-caller-fixture.ts', import.meta.url);
+const ENTRY = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../harness/__fixtures__/node-worker-entry.ts',
+);
 
-interface Harness {
-  worker: Worker;
-  rpc: RPC;
-  cmd: <T = unknown>(command: {type: string; [k: string]: unknown}) => Promise<T>;
-  dispose: () => Promise<void>;
-}
-
-function setupHarness(
+// Reusable setup: NodeTestHarness + enableSyncServer on host + enableSyncClient in worker
+async function createTransportHarness(
   root: object,
-  opts: {dataSabSize?: number} = {},
-): Harness {
-  const worker = new Worker(WORKER_URL);
-  worker.on('error', (err: Error) => {
-    // eslint-disable-next-line no-console
-    console.error('[worker error]', err);
+  opts?: {dataSabSize?: number},
+) {
+  const harness = new NodeTestHarness({client: {entry: ENTRY}});
+  const transport = createRawTransport(harness.host);
+  const syncTransport = enableSyncServer(transport, {
+    dataSabSize: opts?.dataSabSize,
   });
-
-  const rpcListeners: Array<
-    (data: unknown, ctx?: TransportContext) => void | Promise<void>
-  > = [];
-  const testListeners: Array<(data: unknown) => void> = [];
-
-  worker.on('message', (envelope: {kind: string; data: unknown}) => {
-    if (envelope?.kind === 'mixed-signals') {
-      for (const listener of rpcListeners) listener(envelope.data);
-    } else if (envelope?.kind === 'test') {
-      for (const listener of testListeners) listener(envelope.data);
-    }
-  });
-
-  const base: RawTransport = {
-    mode: 'raw',
-    send(data, _ctx) {
-      worker.postMessage({kind: 'mixed-signals', data});
-    },
-    onMessage(cb) {
-      rpcListeners.push(cb);
-    },
-  };
-
-  const wrapped = enableSyncServer(base, {dataSabSize: opts.dataSabSize});
   const rpc = new RPC(root);
-  rpc.addClient(wrapped);
+  rpc.addClient(syncTransport);
+  await harness.ready;
 
-  let nextId = 1;
-  const readyPromise = new Promise<void>((resolve, reject) => {
-    testListeners.push((msg: unknown) => {
-      const m = msg as {type: string; error?: string};
-      if (m.type === 'ready') resolve();
-      if (m.type === 'fatal') {
-        reject(new Error(`worker fatal: ${m.error ?? '(no message)'}`));
-      }
-    });
-  });
+  await harness.client.evaluate(`async () => {
+    const {workerData} = await import('node:worker_threads');
+    const {enableSyncClient} = await import('../../../sync/client.ts');
+    const port = workerData.port;
+    const base = {
+      mode: 'raw',
+      send(data) { port.postMessage(data); },
+      onMessage(cb) { port.on('message', (d) => cb(d)); },
+    };
+    const transport = await enableSyncClient(base, {timeoutMs: 5000});
+    transport.onMessage(() => {});
+    globalThis._transport = transport;
+  }`);
 
-  function cmd<T>(command: {
-    type: string;
-    [k: string]: unknown;
-  }): Promise<T> {
-    const id = nextId++;
-    return readyPromise.then(
-      () =>
-        new Promise<T>((resolve, reject) => {
-          const listener = (msg: unknown) => {
-            const m = msg as {
-              type: string;
-              id?: number;
-              ok?: boolean;
-              error?: string;
-            };
-            if (m.id !== id) return;
-            const idx = testListeners.indexOf(listener);
-            if (idx >= 0) testListeners.splice(idx, 1);
-            if (m.ok === false) {
-              reject(new Error(m.error ?? '(no error message)'));
-            } else {
-              resolve(m as T);
-            }
-          };
-          testListeners.push(listener);
-          worker.postMessage({kind: 'test', data: {...command, id}});
-        }),
-    );
-  }
-
-  return {
-    worker,
-    rpc,
-    cmd,
-    dispose: async () => {
-      await worker.terminate();
-    },
-  };
+  return {harness, rpc};
 }
 
 describe('enableSyncClient + enableSyncServer integration', () => {
-  let h: Harness | undefined;
-
-  beforeEach(() => {
-    h = undefined;
-  });
+  let harness: NodeTestHarness | undefined;
 
   afterEach(async () => {
-    if (h) await h.dispose();
-    h = undefined;
+    if (harness) await harness.terminate();
+    harness = undefined;
   });
 
   it('round-trips a no-op method via rpc.wait', async () => {
-    h = setupHarness({
+    const result = await createTransportHarness({
       ping() {
         return 'pong';
       },
     });
+    harness = result.harness;
 
-    const {results} = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'ping', params: []},
-      ],
-    });
-    expect(
-      (results[0] as Extract<WireMessage, {type: 'result'}>).value,
-    ).toBe('pong');
+    const results = (await harness.client.evaluate(`() => {
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000000, method: 'ping', params: []}]
+      );
+    }`)) as any[];
+
+    expect(results[0].value).toBe('pong');
+    result.rpc.close();
   });
 
   it('round-trips a method with arguments and a primitive return', async () => {
-    h = setupHarness({
+    const result = await createTransportHarness({
       mul(a: number, b: number) {
         return a * b;
       },
     });
+    harness = result.harness;
 
-    const {results} = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'mul', params: [6, 7]},
-      ],
-    });
-    expect(
-      (results[0] as Extract<WireMessage, {type: 'result'}>).value,
-    ).toBe(42);
+    const results = (await harness.client.evaluate(`() => {
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000000, method: 'mul', params: [6, 7]}]
+      );
+    }`)) as any[];
+
+    expect(results[0].value).toBe(42);
+    result.rpc.close();
   });
 
   it('three primitive-returning calls in one rpc.wait round-trip return three correct results in input order', async () => {
-    h = setupHarness({
+    const result = await createTransportHarness({
       one() {
         return 1;
       },
@@ -174,43 +106,42 @@ describe('enableSyncClient + enableSyncServer integration', () => {
         return true;
       },
     });
+    harness = result.harness;
 
-    const {results} = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'one', params: []},
-        {type: 'call', id: 1_000_001, method: 'two', params: []},
-        {type: 'call', id: 1_000_002, method: 'three', params: []},
-      ],
-    });
+    const results = (await harness.client.evaluate(`() => {
+      return globalThis._transport.wait([
+        {type: 'call', id: 1000000, method: 'one', params: []},
+        {type: 'call', id: 1000001, method: 'two', params: []},
+        {type: 'call', id: 1000002, method: 'three', params: []},
+      ]);
+    }`)) as any[];
+
     expect(results).toHaveLength(3);
-    expect(
-      results.map(
-        (m) => (m as Extract<WireMessage, {type: 'result'}>).value,
-      ),
-    ).toEqual([1, 'two', true]);
+    expect(results.map((m: any) => m.value)).toEqual([1, 'two', true]);
+    result.rpc.close();
   });
 
   it('captures errors from methods that throw and reports them as error frames', async () => {
-    h = setupHarness({
+    const result = await createTransportHarness({
       boom() {
         throw new Error('detonated');
       },
     });
-    const {results} = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'boom', params: []},
-      ],
-    });
+    harness = result.harness;
+
+    const results = (await harness.client.evaluate(`() => {
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000000, method: 'boom', params: []}]
+      );
+    }`)) as any[];
+
     expect(results[0]?.type).toBe('error');
-    expect(
-      (results[0] as Extract<WireMessage, {type: 'error'}>).value,
-    ).toMatchObject({message: 'detonated'});
+    expect(results[0].value).toMatchObject({message: 'detonated'});
+    result.rpc.close();
   });
 
   it('round-trips a request envelope ~5× the data SAB through chunking', async () => {
-    h = setupHarness(
+    const result = await createTransportHarness(
       {
         echoLen(s: string) {
           return s.length;
@@ -218,91 +149,93 @@ describe('enableSyncClient + enableSyncServer integration', () => {
       },
       {dataSabSize: MIN_DATA_SAB_BYTES},
     );
+    harness = result.harness;
 
-    const arg = 'x'.repeat(MIN_DATA_SAB_BYTES * 5);
-    const {results} = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'echoLen', params: [arg]},
-      ],
-    });
-    expect(
-      (results[0] as Extract<WireMessage, {type: 'result'}>).value,
-    ).toBe(MIN_DATA_SAB_BYTES * 5);
+    const len = MIN_DATA_SAB_BYTES * 5;
+    const results = (await harness.client.evaluate(`(args) => {
+      const arg = 'x'.repeat(args[0]);
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000000, method: 'echoLen', params: [arg]}]
+      );
+    }`, [len])) as any[];
+
+    expect(results[0].value).toBe(len);
+    result.rpc.close();
   });
 
   it('round-trips a response envelope ~5× the data SAB through chunking', async () => {
-    h = setupHarness(
+    const n = MIN_DATA_SAB_BYTES * 5;
+    const result = await createTransportHarness(
       {
-        bigString(n: number) {
-          return 'y'.repeat(n);
+        bigString(count: number) {
+          return 'y'.repeat(count);
         },
       },
       {dataSabSize: MIN_DATA_SAB_BYTES},
     );
+    harness = result.harness;
 
-    const n = MIN_DATA_SAB_BYTES * 5;
-    const {results} = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'bigString', params: [n]},
-      ],
-    });
-    const value = (results[0] as Extract<WireMessage, {type: 'result'}>)
-      .value as string;
-    expect(value.length).toBe(n);
+    const results = (await harness.client.evaluate(`(args) => {
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000000, method: 'bigString', params: [args[0]]}]
+      );
+    }`, [n])) as any[];
+
+    expect((results[0].value as string).length).toBe(n);
+    result.rpc.close();
   });
 
   it('subsequent sync batches succeed after a prior batch (caller state cleanly resets)', async () => {
-    h = setupHarness({
+    const result = await createTransportHarness({
       identity<T>(v: T) {
         return v;
       },
     });
+    harness = result.harness;
 
-    const first = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'identity', params: ['first']},
-      ],
-    });
-    expect(
-      (first.results[0] as Extract<WireMessage, {type: 'result'}>).value,
-    ).toBe('first');
+    const first = (await harness.client.evaluate(`() => {
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000000, method: 'identity', params: ['first']}]
+      );
+    }`)) as any[];
 
-    const second = await h.cmd<{results: WireMessage[]}>({
-      type: 'wait-batch',
-      calls: [
-        {type: 'call', id: 1_000_001, method: 'identity', params: ['second']},
-      ],
-    });
-    expect(
-      (second.results[0] as Extract<WireMessage, {type: 'result'}>).value,
-    ).toBe('second');
+    expect(first[0].value).toBe('first');
+
+    const second = (await harness.client.evaluate(`() => {
+      return globalThis._transport.wait(
+        [{type: 'call', id: 1000001, method: 'identity', params: ['second']}]
+      );
+    }`)) as any[];
+
+    expect(second[0].value).toBe('second');
+    result.rpc.close();
   });
 
   it('throws SyncRPCTimeoutError if the host never responds within timeoutMs', async () => {
     // Method never returns — the caller's wait() should time out.
-    h = setupHarness({
+    const result = await createTransportHarness({
       hang() {
         return new Promise(() => {
           /* never resolves */
         });
       },
     });
+    harness = result.harness;
 
-    const result = await h.cmd<{
-      type: 'wait-batch-throw-result';
-      errorName: string;
-      errorMessage: string;
-    }>({
-      type: 'wait-batch-expect-throw',
-      calls: [
-        {type: 'call', id: 1_000_000, method: 'hang', params: []},
-      ],
-      timeoutMs: 50,
-    });
-    expect(result.errorName).toBe('SyncRPCTimeoutError');
-    expect(result.errorMessage).toMatch(/timed out/);
+    const thrown = (await harness.client.evaluate(`() => {
+      try {
+        globalThis._transport.wait(
+          [{type: 'call', id: 1000000, method: 'hang', params: []}],
+          {timeoutMs: 50}
+        );
+        return {threw: false};
+      } catch (err) {
+        return {threw: true, errorName: err.name, errorMessage: err.message};
+      }
+    }`)) as any;
+
+    expect(thrown.errorName).toBe('SyncRPCTimeoutError');
+    expect(thrown.errorMessage).toMatch(/timed out/);
+    result.rpc.close();
   });
 });
