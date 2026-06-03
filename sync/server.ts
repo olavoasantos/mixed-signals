@@ -12,7 +12,9 @@ import {
   loadCtrl,
   storeCtrl,
 } from './lane.ts';
+import {SyncRPCResponseTransferableError} from './errors.ts';
 import {ReplayLog} from './replay-log.ts';
+import {findTransferableInValue} from './transferables.ts';
 
 /**
  * Extended transport returned by `enableSyncServer`. Carries the
@@ -678,16 +680,39 @@ export function enableSyncServer(
       timeline.push(notif);
     }
 
-    // 3. Results in caller-input order.
+    // 3. Results in caller-input order. Each result value is scanned
+    //    for Transferable instances; if any are found, the result
+    //    frame is replaced with an error frame carrying
+    //    SyncRPCResponseTransferableError. This is the loud-failure
+    //    guardrail that prevents silent JSON corruption of
+    //    transferable returns (ArrayBuffer → `{}`). Response-side
+    //    transferable transfer is deferred to a future milestone.
     for (const id of batch.orderedIds) {
-      const captured = batch.captured.get(id);
-      timeline.push(
-        captured ?? {
+      let frame: WireMessage =
+        batch.captured.get(id) ?? {
           type: 'error',
           id,
           value: {message: `no response captured for synth id ${id}`},
-        },
-      );
+        };
+
+      // Guardrail: scan result values for Transferable instances.
+      if (frame.type === 'result') {
+        const found = findTransferableInValue(frame.value);
+        if (found) {
+          const err = new SyncRPCResponseTransferableError(
+            'Response-side Transferable values are not yet supported in sync RPC. ' +
+              'This is a planned capability (deferred to a future milestone). ' +
+              `Found: ${found.type} at ${found.path}.`,
+          );
+          frame = {
+            type: 'error',
+            id,
+            value: {message: err.message, name: err.name},
+          };
+        }
+      }
+
+      timeline.push(frame);
     }
 
     // Freeze the timeline: after this point, new notifications must

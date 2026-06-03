@@ -32,7 +32,7 @@
  */
 
 import {isTransferable} from '../shared/codec.ts';
-import type {WireMessage} from '../shared/protocol.ts';
+
 
 /** Reserved `@T` tag for sidecar transferable sentinels. */
 export const TRANSFER_TAG = 'transfer';
@@ -75,17 +75,27 @@ export function isTransferSentinel(v: unknown): v is TransferSentinel {
   );
 }
 
+/** A sync call descriptor with params to walk for transferable substitution. */
+export interface SyncCallDescriptor {
+  method: string;
+  params: unknown[];
+  [key: string]: unknown;
+}
+
 /**
- * Walk a `WireMessage[]` batch (already brand-substituted) and replace
- * every `Transferable` value with a `{@T:'transfer', id:N}` sentinel.
- * Returns the sentinel-substituted calls and the per-batch transferable
- * list. IDs are monotonic starting at 1, unique within the batch.
+ * Walk a batch of sync call descriptors (already brand-substituted) and
+ * replace every `Transferable` value in params with a `{@T:'transfer',
+ * id:N}` sentinel. Returns the sentinel-substituted calls and the
+ * per-batch transferable list. IDs are monotonic starting at 1, unique
+ * within the batch.
  *
  * The walker handles nested Transferables (e.g., an object containing
  * an ArrayBuffer field). Non-Transferable values pass through unchanged.
  */
-export function collectAndReplaceSyncTransferables(calls: WireMessage[]): {
-  calls: WireMessage[];
+export function collectAndReplaceSyncTransferables<
+  T extends SyncCallDescriptor,
+>(calls: T[]): {
+  calls: T[];
   transferables: CollectedTransferable[];
 } {
   let nextId = 1;
@@ -121,14 +131,12 @@ export function collectAndReplaceSyncTransferables(calls: WireMessage[]): {
     return out;
   }
 
-  const result: WireMessage[] = calls.map((call) => ({
+  const result = calls.map((call) => ({
     ...call,
-    params: call.params
-      ? (walkValue(call.params) as unknown[])
-      : call.params,
+    params: walkValue(call.params) as unknown[],
   }));
 
-  return {calls: result, transferables};
+  return {calls: result as T[], transferables};
 }
 
 /**
