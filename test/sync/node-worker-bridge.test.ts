@@ -1,12 +1,8 @@
 /**
  * Tests for the Node `worker_threads` teardown detection helper.
- *
- * Uses a mock Worker (EventEmitter) to test death detection without
- * spawning real workers.
  */
 import EventEmitter from 'node:events';
 import {describe, expect, it, vi} from 'vitest';
-import type {RawTransport} from '../../shared/protocol.ts';
 import {createNodeWorkerBridge} from '../../sync/node-worker-bridge.ts';
 
 function createMockWorker() {
@@ -19,137 +15,53 @@ function createMockWorker() {
   };
 }
 
-function createStubTransport(): RawTransport & {sent: unknown[]} {
-  const sent: unknown[] = [];
-  return {
-    mode: 'raw',
-    sent,
-    send(data: unknown) {
-      sent.push(data);
-    },
-    onMessage() {},
-  };
-}
-
 describe('createNodeWorkerBridge', () => {
-  it('sends client_dead on worker error event', () => {
+  it('calls onDeath on worker error event', () => {
     const worker = createMockWorker();
-    const transport = createStubTransport();
+    const onDeath = vi.fn();
 
     const bridge = createNodeWorkerBridge({
       worker: worker as any,
-      hostTransport: transport,
-      clientId: 'node-test-client',
+      onDeath,
       workerHeartbeatTimeoutMs: 0,
     });
 
     worker.emit('error', new Error('worker crashed'));
-
-    const deadMsg = transport.sent.find(
-      (m) =>
-        typeof m === 'object' &&
-        m !== null &&
-        (m as {__sync?: string}).__sync === 'client_dead',
-    ) as {clientId: string};
-    expect(deadMsg).toBeDefined();
-    expect(deadMsg.clientId).toBe('node-test-client');
+    expect(onDeath).toHaveBeenCalledOnce();
 
     bridge.dispose();
   });
 
-  it('sends client_dead on worker exit event', () => {
+  it('calls onDeath on worker exit event', () => {
     const worker = createMockWorker();
-    const transport = createStubTransport();
+    const onDeath = vi.fn();
 
     const bridge = createNodeWorkerBridge({
       worker: worker as any,
-      hostTransport: transport,
-      clientId: 'exit-client',
+      onDeath,
       workerHeartbeatTimeoutMs: 0,
     });
 
     worker.emit('exit', 1);
-
-    const deadMsg = transport.sent.find(
-      (m) => (m as {__sync?: string}).__sync === 'client_dead',
-    ) as {clientId: string};
-    expect(deadMsg).toBeDefined();
-    expect(deadMsg.clientId).toBe('exit-client');
-
-    bridge.dispose();
-  });
-
-  it('captures epoch from wrapped hs-res message', () => {
-    const worker = createMockWorker();
-    const transport = createStubTransport();
-
-    const bridge = createNodeWorkerBridge({
-      worker: worker as any,
-      hostTransport: transport,
-      clientId: 'epoch-client',
-      workerHeartbeatTimeoutMs: 0,
-    });
-
-    // Simulate wrapped hs-res message (multiplexed envelope).
-    worker.emit('message', {
-      kind: 'mixed-signals',
-      data: {
-        __sync: 'hs-res',
-        control: new SharedArrayBuffer(256),
-        data: new SharedArrayBuffer(4096),
-        epoch: 42,
-      },
-    });
-
-    worker.emit('error', new Error('crash'));
-
-    const deadMsg = transport.sent.find(
-      (m) => (m as {__sync?: string}).__sync === 'client_dead',
-    ) as {epoch: number};
-    expect(deadMsg.epoch).toBe(42);
+    expect(onDeath).toHaveBeenCalledOnce();
 
     bridge.dispose();
   });
 
   it('death detection is idempotent — error then exit fires once', () => {
     const worker = createMockWorker();
-    const transport = createStubTransport();
+    const onDeath = vi.fn();
 
     const bridge = createNodeWorkerBridge({
       worker: worker as any,
-      hostTransport: transport,
-      clientId: 'dedup-client',
+      onDeath,
       workerHeartbeatTimeoutMs: 0,
     });
 
     worker.emit('error', new Error('crash'));
     worker.emit('exit', 1);
 
-    const deadMsgs = transport.sent.filter(
-      (m) => (m as {__sync?: string}).__sync === 'client_dead',
-    );
-    expect(deadMsgs).toHaveLength(1);
-
-    bridge.dispose();
-  });
-
-  it('sends epoch-0 when no hs-res was captured', () => {
-    const worker = createMockWorker();
-    const transport = createStubTransport();
-
-    const bridge = createNodeWorkerBridge({
-      worker: worker as any,
-      hostTransport: transport,
-      clientId: 'pre-hs',
-      workerHeartbeatTimeoutMs: 0,
-    });
-
-    worker.emit('error', new Error('crash'));
-
-    const deadMsg = transport.sent.find(
-      (m) => (m as {__sync?: string}).__sync === 'client_dead',
-    ) as {epoch: number};
-    expect(deadMsg.epoch).toBe(0);
+    expect(onDeath).toHaveBeenCalledOnce();
 
     bridge.dispose();
   });
@@ -158,12 +70,11 @@ describe('createNodeWorkerBridge', () => {
     vi.useFakeTimers();
     try {
       const worker = createMockWorker();
-      const transport = createStubTransport();
+      const onDeath = vi.fn();
 
       const bridge = createNodeWorkerBridge({
         worker: worker as any,
-        hostTransport: transport,
-        clientId: 'heartbeat-client',
+        onDeath,
         workerHeartbeatTimeoutMs: 5000,
       });
 
@@ -172,10 +83,7 @@ describe('createNodeWorkerBridge', () => {
 
       vi.advanceTimersByTime(5001);
 
-      const deadMsg = transport.sent.find(
-        (m) => (m as {__sync?: string}).__sync === 'client_dead',
-      );
-      expect(deadMsg).toBeDefined();
+      expect(onDeath).toHaveBeenCalledOnce();
 
       bridge.dispose();
     } finally {
@@ -183,13 +91,31 @@ describe('createNodeWorkerBridge', () => {
     }
   });
 
-  it('dispose removes all listeners', () => {
+  it('swallows onDeath callback errors', () => {
     const worker = createMockWorker();
-    const transport = createStubTransport();
+    const onDeath = vi.fn(() => {
+      throw new Error('callback exploded');
+    });
 
     const bridge = createNodeWorkerBridge({
       worker: worker as any,
-      hostTransport: transport,
+      onDeath,
+      workerHeartbeatTimeoutMs: 0,
+    });
+
+    expect(() => worker.emit('error', new Error('crash'))).not.toThrow();
+    expect(onDeath).toHaveBeenCalledOnce();
+
+    bridge.dispose();
+  });
+
+  it('dispose removes all listeners', () => {
+    const worker = createMockWorker();
+    const onDeath = vi.fn();
+
+    const bridge = createNodeWorkerBridge({
+      worker: worker as any,
+      onDeath,
       workerHeartbeatTimeoutMs: 0,
     });
 
@@ -206,11 +132,11 @@ describe('createNodeWorkerBridge', () => {
 
   it('dispose is idempotent', () => {
     const worker = createMockWorker();
-    const transport = createStubTransport();
+    const onDeath = vi.fn();
 
     const bridge = createNodeWorkerBridge({
       worker: worker as any,
-      hostTransport: transport,
+      onDeath,
       workerHeartbeatTimeoutMs: 0,
     });
 

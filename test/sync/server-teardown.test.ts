@@ -324,3 +324,188 @@ describe('host-side CALLER_STATE poll', () => {
     expect(onClientDead).not.toHaveBeenCalled();
   });
 });
+
+// ── Lifecycle reset regression tests ───────────────────────────────
+
+describe('lifecycle reset on re-handshake', () => {
+  it('clears CALLER_STATE on re-handshake so doorbells work again', async () => {
+    const onClientDead = vi.fn();
+    const {transport, sent, receive} = createStubTransport();
+    let rpcCallback: ((data: unknown) => void) | undefined;
+
+    const wrapper = enableSyncServer(transport, {
+      onClientDead,
+      clientId: 'reset-test',
+    });
+    wrapper.onMessage((data) => {
+      rpcCallback?.(data);
+    });
+
+    // First handshake.
+    receive({__sync: 'hs-req'});
+    const hs1 = extractHsRes(sent);
+    const controlView = new Int32Array(hs1.control);
+    const dataU8 = new Uint8Array(hs1.data);
+
+    // Simulate death via client_dead notification.
+    receive({
+      __sync: 'client_dead',
+      epoch: hs1.epoch,
+      clientId: 'reset-test',
+    });
+    expect(onClientDead).toHaveBeenCalledOnce();
+
+    // Re-handshake (HMR recycle).
+    sent.length = 0;
+    onClientDead.mockClear();
+    receive({__sync: 'hs-req'});
+    const hs2 = extractHsRes(sent);
+
+    // CALLER_STATE should now be ALIVE, not stuck at DEAD.
+    expect(Atomics.load(controlView, CTRL.CALLER_STATE)).toBe(
+      CALLER_STATE.ALIVE,
+    );
+
+    // A doorbell should be accepted (not silently dropped).
+    let doorbellProcessed = false;
+    rpcCallback = (msg) => {
+      doorbellProcessed = true;
+      const m = msg as WireMessage;
+      if (m.type === 'call') {
+        wrapper.send({type: 'result', id: m.id, value: 'alive'});
+      }
+    };
+
+    const request = JSON.stringify({
+      seq: 1,
+      calls: [{method: 'ping', params: []}],
+    });
+    const encoded = new TextEncoder().encode(request);
+    dataU8.set(encoded, 0);
+    storeCtrl(controlView, CTRL.CHUNK_BYTES_VALID, encoded.byteLength);
+    storeCtrl(controlView, CTRL.CHUNK_STATE, CHUNK_STATE.DONE);
+    storeCtrl(controlView, CTRL.BATCH_SIZE, 1);
+    storeCtrl(controlView, CTRL.REQUEST_SEQ, 1);
+
+    await receive({__sync: 'doorbell', seq: 1});
+    expect(doorbellProcessed).toBe(true);
+  });
+
+  it('allows same clientId to die again in a new epoch', () => {
+    const onClientDead = vi.fn();
+    const {transport, sent, receive} = createStubTransport();
+    enableSyncServer(transport, {onClientDead});
+
+    // First handshake + death.
+    receive({__sync: 'hs-req'});
+    const hs1 = extractHsRes(sent);
+    receive({
+      __sync: 'client_dead',
+      epoch: hs1.epoch,
+      clientId: 'same-id',
+    });
+    expect(onClientDead).toHaveBeenCalledTimes(1);
+
+    // Re-handshake with same clientId.
+    sent.length = 0;
+    receive({__sync: 'hs-req'});
+    const hs2 = extractHsRes(sent);
+
+    // Second death with same clientId but new epoch.
+    receive({
+      __sync: 'client_dead',
+      epoch: hs2.epoch,
+      clientId: 'same-id',
+    });
+    expect(onClientDead).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── markDead unit tests ────────────────────────────────────────────
+
+describe('enableSyncServer markDead', () => {
+  it('fires onClientDead with the given clientId', () => {
+    const onClientDead = vi.fn();
+    const {transport, sent, receive} = createStubTransport();
+    const wrapper = enableSyncServer(transport, {
+      onClientDead,
+      clientId: 'mark-dead-test',
+    });
+
+    receive({__sync: 'hs-req'});
+
+    wrapper.markDead('mark-dead-test');
+    expect(onClientDead).toHaveBeenCalledWith('mark-dead-test');
+  });
+
+  it('stores CALLER_STATE.DEAD in the SAB', () => {
+    const {transport, sent, receive} = createStubTransport();
+    const wrapper = enableSyncServer(transport);
+
+    receive({__sync: 'hs-req'});
+    const hs = extractHsRes(sent);
+    const controlView = new Int32Array(hs.control);
+
+    wrapper.markDead('w1');
+    expect(Atomics.load(controlView, CTRL.CALLER_STATE)).toBe(
+      CALLER_STATE.DEAD,
+    );
+  });
+
+  it('is idempotent — second call is a no-op', () => {
+    const onClientDead = vi.fn();
+    const {transport, sent, receive} = createStubTransport();
+    const wrapper = enableSyncServer(transport, {onClientDead});
+
+    receive({__sync: 'hs-req'});
+
+    wrapper.markDead('w1');
+    wrapper.markDead('w1');
+    expect(onClientDead).toHaveBeenCalledOnce();
+  });
+
+  it('ignores empty clientId', () => {
+    const onClientDead = vi.fn();
+    const {transport, receive} = createStubTransport();
+    const wrapper = enableSyncServer(transport, {onClientDead});
+
+    receive({__sync: 'hs-req'});
+
+    wrapper.markDead('');
+    expect(onClientDead).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates with the postMessage client_dead path', () => {
+    const onClientDead = vi.fn();
+    const {transport, sent, receive} = createStubTransport();
+    const wrapper = enableSyncServer(transport, {onClientDead});
+
+    receive({__sync: 'hs-req'});
+    const hs = extractHsRes(sent);
+
+    // markDead fires first.
+    wrapper.markDead('w1');
+    expect(onClientDead).toHaveBeenCalledOnce();
+
+    // Then the postMessage notification arrives — should be deduped.
+    receive({
+      __sync: 'client_dead',
+      epoch: hs.epoch,
+      clientId: 'w1',
+    });
+    expect(onClientDead).toHaveBeenCalledOnce();
+  });
+
+  it('swallows onClientDead callback errors', () => {
+    const onClientDead = vi.fn(() => {
+      throw new Error('callback threw');
+    });
+    const {transport, receive} = createStubTransport();
+    const wrapper = enableSyncServer(transport, {onClientDead});
+
+    receive({__sync: 'hs-req'});
+
+    expect(() => wrapper.markDead('w1')).not.toThrow();
+    expect(onClientDead).toHaveBeenCalled();
+  });
+});

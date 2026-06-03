@@ -46,18 +46,22 @@ export function markCallerDead(opts: {
   try {
     const view = new Int32Array(controlSab);
     Atomics.store(view, CTRL.CALLER_STATE, CALLER_STATE.DEAD);
-  } catch {
+  } catch (err) {
     // SAB may be detached or GC'd under heavy memory pressure.
     // The lifecycle owner has already decided death happened;
     // swallow and continue to the notification.
+    // eslint-disable-next-line no-console
+    console.warn('[mixed-signals/sync] markCallerDead: SAB store failed', err);
   }
 
   // Step 2: Send the client_dead notification envelope.
   try {
     hostTransport.send({__sync: 'client_dead', epoch, clientId});
-  } catch {
+  } catch (err) {
     // Transport may already be disposed. The SAB store (step 1)
     // is the primary signal; the notification is a courtesy.
     // The host's chunk poll will still detect death.
+    // eslint-disable-next-line no-console
+    console.warn('[mixed-signals/sync] markCallerDead: transport send failed', err);
   }
 }

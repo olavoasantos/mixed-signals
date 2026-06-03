@@ -47,10 +47,9 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
  * MUST exceed the P99 of the slowest expected `rpc.wait` round
  * trip. Default 30000 ms matches the project's retention TTL
  * default; lower it only with measured headroom. The
- * `{__sync: 'client_dead'}` frame is also a producer-only signal
- * in M001 — the host wrapper (`enableSyncServer`) silently drops
- * it. The end-to-end teardown protocol lands with a later
- * milestone; until then this hook is detection-only.
+ * `{__sync: 'client_dead'}` notification is processed by
+ * `enableSyncServer`'s `handleClientDead`, which validates
+ * the epoch, deduplicates, and invokes `onClientDead`.
  *
  * The worker still sees a fully synchronous `rpc.wait(...)`. The
  * parent sees only async RPC traffic. The broker absorbs the
@@ -287,6 +286,8 @@ export function _createIframeBrokerBridgeInternal(opts: {
   // transport. We expose a thin façade that supports the
   // `RawTransport` shape for debug listeners. `server` is the
   // user-supplied `hostTransport` echoed back unchanged.
+  const facadeCleanups: Array<() => void> = [];
+
   const clientFacade: RawTransport = {
     mode: 'raw',
     send(data, ctx) {
@@ -296,11 +297,13 @@ export function _createIframeBrokerBridgeInternal(opts: {
       worker.postMessage(data, transfer);
     },
     onMessage(cb) {
+      if (disposed) return;
       const wrapped = (event: MessageEvent) => {
         if (disposed) return;
         cb(event.data);
       };
       worker.addEventListener('message', wrapped);
+      facadeCleanups.push(() => worker.removeEventListener('message', wrapped));
     },
   };
 
@@ -316,6 +319,8 @@ export function _createIframeBrokerBridgeInternal(opts: {
         heartbeatTimer = null;
       }
       workerListeners.length = 0;
+      for (const cleanup of facadeCleanups) cleanup();
+      facadeCleanups.length = 0;
     },
     server: hostTransport,
     client: clientFacade,

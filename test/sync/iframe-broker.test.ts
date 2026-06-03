@@ -329,19 +329,6 @@ describe('createIframeBrokerBridge — teardown detection', () => {
     return {bridge, worker, host, control, epoch};
   }
 
-  it('calls markCallerDead on worker error event', () => {
-    const {bridge, host, control} = createBrokerWithHandshake();
-
-    // Simulate a worker crash.
-    bridge; // keep reference
-    // The error event triggers emitDeath -> markCallerDead.
-    const worker = makeFakeWorker(); // can't use the original since it's captured
-    // Actually, let's use the internal worker reference.
-    // We need to emit error on the original worker.
-    // Let's restructure to keep the worker reference.
-    bridge.dispose(); // cleanup
-  });
-
   it('sends client_dead upstream on worker error event', () => {
     const worker = makeFakeWorker();
     const host = makeFakeHostTransport();

@@ -21,6 +21,7 @@ export {supportsSync} from './support.node.ts';
 
 // ── Transport wrappers ──────────────────────────────────────────────────
 export {enableSyncServer} from './server.ts';
+export type {SyncServerTransport} from './server.ts';
 export {enableSyncClient} from './client.ts';
 
 // ── Iframe topology helpers ─────────────────────────────────────────────

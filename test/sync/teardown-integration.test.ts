@@ -12,7 +12,9 @@ import type {
   RawTransport,
   TransportContext,
 } from '../../shared/protocol.ts';
+import {createNodeWorkerBridge} from '../../sync/node-worker-bridge.ts';
 import {enableSyncServer} from '../../sync/server.ts';
+import type {SyncServerTransport} from '../../sync/server.ts';
 
 const FIXTURE_URL = new URL('./_teardown-fixture.ts', import.meta.url);
 
@@ -66,27 +68,30 @@ function setupHarness(
 
   const rpc = new RPC(root);
 
-  function handleWorkerDeath(): void {
-    if (onClientDeadCalls.includes(clientId)) return;
-    onClientDeadCalls.push(clientId);
-    rpc.removeClient(clientId);
-    resolveClientDead(clientId);
-  }
-
   const wrapped = enableSyncServer(base, {
     clientId,
     onClientDead(deadClientId) {
-      // From the CALLER_STATE poll or postMessage notification path.
-      handleWorkerDeath();
+      // From handleClientDead, notifyClientDeadFromPoll, or markDead.
+      if (onClientDeadCalls.includes(deadClientId)) return;
+      onClientDeadCalls.push(deadClientId);
+      rpc.removeClient(deadClientId);
+      resolveClientDead(deadClientId);
     },
   });
   rpc.addClient(wrapped, clientId);
 
-  // Wire up the Node worker bridge for death detection via exit/error.
-  // On death, directly invoke the cleanup handler — in the Node
-  // topology the bridge and enableSyncServer are co-located.
-  worker.on('exit', () => handleWorkerDeath());
-  worker.on('error', () => handleWorkerDeath());
+  // Co-located lifecycle seam: the Node bridge calls markDead on
+  // the sync wrapper, which aborts any active batch AND fires
+  // onClientDead. This is the production-correct wiring.
+  const syncWrapped = wrapped as SyncServerTransport;
+
+  const bridge = createNodeWorkerBridge({
+    worker,
+    onDeath() {
+      syncWrapped.markDead(clientId);
+    },
+    workerHeartbeatTimeoutMs: 0, // rely on exit/error events
+  });
 
   let nextId = 1;
   const readyPromise = new Promise<void>((resolve, reject) => {
@@ -136,6 +141,7 @@ function setupHarness(
     onClientDeadPromise,
     cmd,
     dispose: async () => {
+      bridge.dispose();
       await worker.terminate();
     },
   };

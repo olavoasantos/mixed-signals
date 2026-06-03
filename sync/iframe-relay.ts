@@ -83,10 +83,9 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
  *   - Worker heartbeat: after the first worker message arrives, a
  *     timer is armed for `workerHeartbeatTimeoutMs` (default
  *     30000 ms). If no further worker message lands within that
- *     window, the relay posts `{__sync: 'client_dead'}` upstream
- *     to the parent exactly once. The full worker-teardown
- *     lifecycle protocol lands in a later milestone; this hook is
- *     the detection point.
+ *     window, the relay calls `markCallerDead` which stores
+ *     `CALLER_STATE = DEAD` in the SAB and sends
+ *     `{__sync: 'client_dead', epoch, clientId}` upstream.
  *
  * **Heartbeat threshold caveat.** A worker blocked in
  * `Atomics.wait` for a sync round-trip is silent on postMessage
@@ -96,10 +95,9 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
  * MUST exceed the P99 of the slowest expected `rpc.wait` round
  * trip. Default 30000 ms matches the project's retention TTL
  * default; lower it only with measured headroom. The
- * `{__sync: 'client_dead'}` frame is also a producer-only signal
- * in M001 — the host wrapper (`enableSyncServer`) silently drops
- * it. The end-to-end teardown protocol lands with a later
- * milestone; until then this hook is detection-only.
+ * `{__sync: 'client_dead'}` notification is processed by
+ * `enableSyncServer`'s `handleClientDead`, which validates
+ * the epoch, deduplicates, and invokes `onClientDead`.
  *
  * **Constructing two relays against the same worker is forbidden.**
  * Worker postMessage events fan out to every attached listener, so
@@ -285,8 +283,9 @@ export function _createIframeRelayBridgeInternal(opts: {
   //
   // Each façade re-uses the underlying postMessage / addEventListener
   // surfaces of the corresponding side. They share state with the
-  // bridge: `dispose()`-ing the bridge also detaches every façade's
-  // listeners by clearing the bridge's own.
+  // bridge: facade listeners are tracked and removed on dispose().
+
+  const facadeCleanups: Array<() => void> = [];
 
   const serverFacade: RawTransport = {
     mode: 'raw',
@@ -297,6 +296,7 @@ export function _createIframeRelayBridgeInternal(opts: {
       parentWindow.postMessage(data, parentOrigin, transfer);
     },
     onMessage(cb) {
+      if (disposed) return;
       const wrapper = (event: MessageEvent) => {
         if (disposed) return;
         if (event.source !== parentWindow) return;
@@ -304,6 +304,7 @@ export function _createIframeRelayBridgeInternal(opts: {
         cb(event.data);
       };
       localWindow.addEventListener('message', wrapper);
+      facadeCleanups.push(() => localWindow.removeEventListener('message', wrapper));
     },
   };
 
@@ -316,11 +317,13 @@ export function _createIframeRelayBridgeInternal(opts: {
       worker.postMessage(data, transfer);
     },
     onMessage(cb) {
+      if (disposed) return;
       const wrapper = (event: MessageEvent) => {
         if (disposed) return;
         cb(event.data);
       };
       worker.addEventListener('message', wrapper);
+      facadeCleanups.push(() => worker.removeEventListener('message', wrapper));
     },
   };
 
@@ -336,6 +339,8 @@ export function _createIframeRelayBridgeInternal(opts: {
         clearTimeout(heartbeatTimer);
         heartbeatTimer = null;
       }
+      for (const cleanup of facadeCleanups) cleanup();
+      facadeCleanups.length = 0;
     },
     server: serverFacade,
     client: clientFacade,

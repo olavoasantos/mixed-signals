@@ -2,10 +2,10 @@
  * Node `worker_threads` teardown detection helper.
  *
  * Wraps a Node `Worker` with death-detection wiring: listens for
- * `error` and `exit` events, plus an optional heartbeat, and sends
- * `{__sync: 'client_dead', epoch, clientId}` to the host transport
- * when any fires. The `enableSyncServer` wrapper processes the
- * notification and invokes the user's `onClientDead` callback.
+ * `error` and `exit` events, plus an optional heartbeat, and calls
+ * the `onDeath` callback when any fires. The consumer wires
+ * `onDeath` to their cleanup logic (typically
+ * `rpc.removeClient(clientId)`).
  *
  * Exported only via the Node conditional entry (`sync/index.node.ts`).
  * The browser bundle never loads this file.
@@ -14,19 +14,17 @@
  * (even on `SIGKILL`), so heartbeat is a belt-and-suspenders measure
  * rather than a primary detection mechanism.
  *
- * **SAB marking.** The bridge does not directly mark `CALLER_STATE =
- * DEAD` in the SAB. In the iframe topologies (relay, broker), the
- * bridge intercepts the hs-res in transit to capture the SAB, but in
- * the Node case messages are often multiplexed through an envelope
- * wrapper (e.g., `{kind: 'mixed-signals', data}`) that makes
- * transparent interception fragile. Instead, the bridge sends the
- * `client_dead` notification to the `enableSyncServer` wrapper,
- * which handles SAB cleanup and invokes `onClientDead`. The server's
- * CALLER_STATE poll (`M003I005T`) covers the fast-abort path.
+ * **Why `onDeath` instead of sending through a transport:** In the
+ * iframe topologies (relay, broker), the bridge intercepts messages
+ * in transit and can call `markCallerDead` to both store DEAD in
+ * the SAB and send a `client_dead` notification. In the Node case
+ * the bridge and `enableSyncServer` are co-located in the same
+ * process, and the `RawTransport.send` direction is host→worker
+ * (not into the server's inbound). The `onDeath` callback is the
+ * direct, correct seam for co-located lifecycle owners.
  */
 
 import type {Worker} from 'node:worker_threads';
-import type {RawTransport} from '../shared/protocol.ts';
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
 
@@ -43,45 +41,35 @@ export interface NodeWorkerBridge {
  * Worker.
  *
  * @param opts.worker - The Node Worker instance to monitor.
- * @param opts.hostTransport - Transport that `enableSyncServer`
- *   wraps. The bridge posts `client_dead` notifications here;
- *   the server's inbound handler processes them.
- * @param opts.clientId - Stable client identifier. Random if omitted.
+ * @param opts.onDeath - Called once when the worker is detected as
+ *   dead. Wire to cleanup logic (e.g., `rpc.removeClient(clientId)`).
  * @param opts.workerHeartbeatTimeoutMs - Heartbeat timeout. Default
  *   30000 ms. Set to 0 to disable heartbeat (rely on error/exit only).
  */
 export function createNodeWorkerBridge(opts: {
   worker: Worker;
-  hostTransport: RawTransport;
-  clientId?: string;
+  onDeath: () => void;
   workerHeartbeatTimeoutMs?: number;
 }): NodeWorkerBridge {
   const {
     worker,
-    hostTransport,
-    clientId = crypto.randomUUID(),
+    onDeath,
     workerHeartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   } = opts;
 
   let disposed = false;
   let deadEmitted = false;
 
-  // Captured epoch from hs-res passing through the transport.
-  // The bridge attempts to capture it from worker messages (which
-  // may be wrapped) or falls back to epoch 0.
-  let capturedEpoch = 0;
-
   function emitDeath(): void {
     if (disposed || deadEmitted) return;
     deadEmitted = true;
     try {
-      hostTransport.send({
-        __sync: 'client_dead',
-        epoch: capturedEpoch,
-        clientId,
-      });
-    } catch {
-      // Transport may be disposed.
+      onDeath();
+    } catch (err) {
+      // Consumer callback threw — swallow. The lifecycle owner
+      // has already decided death happened.
+      // eslint-disable-next-line no-console
+      console.warn('[mixed-signals/sync] createNodeWorkerBridge: onDeath callback threw', err);
     }
   }
 
@@ -96,27 +84,11 @@ export function createNodeWorkerBridge(opts: {
     (heartbeatTimer as unknown as {unref?: () => void}).unref?.();
   }
 
-  // Monitor worker messages to arm heartbeat and attempt epoch capture.
-  const onMessage = (data: unknown) => {
+  // Monitor worker messages to arm heartbeat.
+  const onMessage = () => {
     if (disposed) return;
     armHeartbeat();
-    // Try to capture epoch from hs-res (may be wrapped).
-    tryCapture(data);
   };
-
-  /** Recursively try to extract epoch from an hs-res message. */
-  function tryCapture(data: unknown): void {
-    if (!data || typeof data !== 'object') return;
-    const d = data as Record<string, unknown>;
-    if (d.__sync === 'hs-res' && typeof d.epoch === 'number') {
-      capturedEpoch = d.epoch as number;
-      return;
-    }
-    // Wrapped envelope (e.g., {kind: 'mixed-signals', data: ...}).
-    if (d.data && typeof d.data === 'object') {
-      tryCapture(d.data);
-    }
-  }
 
   const onError = () => emitDeath();
   const onExit = () => emitDeath();
