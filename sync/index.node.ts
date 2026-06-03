@@ -30,6 +30,9 @@ export {createIframeBrokerBridge} from './iframe-broker.ts';
 // ── Adapter helpers ─────────────────────────────────────────────────────
 export {wrapWindowPostMessage, wrapMessagePort} from './adapters.ts';
 
+// ── Node-only: worker_threads teardown helper ────────────────────────────
+export {createNodeWorkerBridge} from './node-worker-bridge.ts';
+
 // ── Error classes (instanceof-checkable family rooted at SyncRPCError) ──
 export {
   SyncRPCAlreadyWaitedError,
@@ -50,3 +53,4 @@ export type {
   IframeBrokerBridge,
   IframeRelayBridge,
 } from './iframe-bridge.ts';
+export type {NodeWorkerBridge} from './node-worker-bridge.ts';
