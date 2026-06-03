@@ -14,7 +14,12 @@ import {
 } from './lane.ts';
 import {SyncRPCResponseTransferableError} from './errors.ts';
 import {ReplayLog} from './replay-log.ts';
-import {findTransferableInValue} from './transferables.ts';
+import {
+  collectExpectedTransferIds,
+  findTransferableInValue,
+  reconstructTransferables,
+  type SidecarMessage,
+} from './transferables.ts';
 
 /**
  * Extended transport returned by `enableSyncServer`. Carries the
@@ -227,6 +232,24 @@ export function enableSyncServer(
   // client death or rehandshake.
   let sidecarPort: MessagePort | null = null;
 
+  // Sidecar receive buffer. Incoming transferable values are keyed
+  // by (batchSeq, id) so the host can reconstruct wire envelopes
+  // that contain @T:'transfer' sentinels. The buffer is populated
+  // by the sidecar onmessage handler and consumed during doorbell
+  // processing. Entries are cleared after dispatch to free
+  // references. Bounded to MAX_BUFFERED_BATCHES recent batches;
+  // oldest evict on overflow.
+  const MAX_BUFFERED_BATCHES = 16;
+  const sidecarBuffer = new Map<number, Map<number, unknown>>();
+  // Per-batch resolvers: when the doorbell handler awaits missing
+  // transferables, it registers a resolver keyed by batchSeq.
+  // The sidecar onmessage fires the resolver when all expected
+  // ids for that batch are buffered.
+  const sidecarResolvers = new Map<
+    number,
+    {expected: Set<number>; resolve: () => void}
+  >();
+
   // The single callback `rpc.addClient` registers via the wrapper's
   // `onMessage`. Non-sync inbound traffic and synthesized inbound calls
   // both flow through this.
@@ -338,6 +361,50 @@ export function enableSyncServer(
     const sidecarChannel = new MessageChannel();
     sidecarPort = sidecarChannel.port1;
     sidecarPort.start();
+
+    // Wire the sidecar receive listener. Populates the buffer with
+    // incoming {seq, id, value} messages; fires any pending resolver
+    // when the last expected id for a batch arrives.
+    sidecarPort.onmessage = (event: MessageEvent) => {
+      const msg = event.data as SidecarMessage;
+      if (
+        !msg ||
+        typeof msg.seq !== 'number' ||
+        typeof msg.id !== 'number'
+      ) {
+        return; // Malformed sidecar message — ignore.
+      }
+      let batchBuf = sidecarBuffer.get(msg.seq);
+      if (!batchBuf) {
+        batchBuf = new Map<number, unknown>();
+        sidecarBuffer.set(msg.seq, batchBuf);
+        // Evict oldest batches if the buffer exceeds the bound.
+        if (sidecarBuffer.size > MAX_BUFFERED_BATCHES) {
+          const oldest = sidecarBuffer.keys().next().value;
+          if (oldest !== undefined) {
+            sidecarBuffer.delete(oldest);
+            sidecarResolvers.delete(oldest);
+          }
+        }
+      }
+      batchBuf.set(msg.id, msg.value);
+
+      // Check if a pending resolver is satisfied.
+      const pending = sidecarResolvers.get(msg.seq);
+      if (pending) {
+        let allPresent = true;
+        for (const id of pending.expected) {
+          if (!batchBuf.has(id)) {
+            allPresent = false;
+            break;
+          }
+        }
+        if (allPresent) {
+          sidecarResolvers.delete(msg.seq);
+          pending.resolve();
+        }
+      }
+    };
 
     // Reset lifecycle state from any prior death on this wrapper.
     // Without this, a wrapper that has processed a death permanently
@@ -455,6 +522,13 @@ export function enableSyncServer(
       }
       sidecarPort = null;
     }
+    // Clear any pending sidecar state.
+    sidecarBuffer.clear();
+    // Resolve any pending waiters so they don't hang.
+    for (const pending of sidecarResolvers.values()) {
+      pending.resolve();
+    }
+    sidecarResolvers.clear();
   }
 
   function notifyClientDeadFromPoll(clientId: string): void {
@@ -622,29 +696,113 @@ export function enableSyncServer(
     // broker) can see the active-sync state on the SAB.
     storeCtrl(controlView, CTRL.ACTIVE_SYNC_SEQ, seq);
 
-    // Pre-allocate every synth id BEFORE dispatching any call.
-    const synthesizedCalls: WireMessage[] = [];
-    for (const call of calls) {
-      const synthId = nextSynthId++;
-      batch.orderedIds.push(synthId);
-      batch.expected.add(synthId);
-      synthesizedCalls.push({
-        type: 'call',
-        id: synthId,
-        method: call.method,
-        params: call.params ?? [],
-      });
-    }
-    const expectedTotal = batch.expected.size;
+    // ── Sidecar transferable reconstruction ──────────────────────────
+    // Scan the parsed calls for @T:'transfer' sentinels. If any are
+    // found, wait for the matching transferable values to arrive on
+    // the sidecar (or find them already buffered), then reconstruct
+    // the calls by swapping sentinels for actual values.
+    let skipDispatch = false;
+    const expectedIds = collectExpectedTransferIds(calls);
+    if (expectedIds.size > 0) {
+      const batchBuf = sidecarBuffer.get(seq) ?? new Map<number, unknown>();
+      if (!sidecarBuffer.has(seq)) sidecarBuffer.set(seq, batchBuf);
 
-    // Dispatch.
-    for (const synthesized of synthesizedCalls) {
-      rpcOnMessage?.(synthesized);
+      // Check if all expected transferables are already buffered.
+      let allPresent = true;
+      for (const id of expectedIds) {
+        if (!batchBuf.has(id)) {
+          allPresent = false;
+          break;
+        }
+      }
+
+      if (!allPresent) {
+        // Await remaining transferables with a timeout.
+        const SIDECAR_TIMEOUT_MS = 1000;
+        const sidecarDone = await Promise.race([
+          new Promise<'ok'>((resolve) => {
+            sidecarResolvers.set(seq, {
+              expected: expectedIds,
+              resolve: () => resolve('ok'),
+            });
+          }),
+          new Promise<'timeout'>((resolve) => {
+            const timer = setTimeout(
+              () => resolve('timeout'),
+              SIDECAR_TIMEOUT_MS,
+            );
+            (timer as unknown as {unref?: () => void}).unref?.();
+          }),
+        ]);
+        sidecarResolvers.delete(seq);
+
+        if (batch.aborted) {
+          sidecarBuffer.delete(seq);
+          return;
+        }
+        if (sidecarDone === 'timeout') {
+          // Timeout: pre-populate error frames for all calls so the
+          // normal response composition path below emits them.
+          skipDispatch = true;
+          for (const call of calls) {
+            const synthId = nextSynthId++;
+            batch.orderedIds.push(synthId);
+            batch.expected.add(synthId);
+            batch.captured.set(synthId, {
+              type: 'error',
+              id: synthId,
+              value: {
+                message:
+                  `Sidecar transferable timeout: expected ${expectedIds.size} ` +
+                  `transferables for batch seq=${seq}, received ${batchBuf.size}`,
+                name: 'SyncRPCError',
+              },
+            });
+          }
+          resolveDone();
+          sidecarBuffer.delete(seq);
+        }
+      }
+
+      if (!skipDispatch) {
+        // Reconstruct: replace sentinels with actual values.
+        const finalBuf = sidecarBuffer.get(seq)!;
+        const reconstructed = reconstructTransferables(calls, finalBuf);
+        // Overwrite calls in-place for the dispatch below.
+        for (let i = 0; i < calls.length; i++) {
+          calls[i] = reconstructed[i]!;
+        }
+        // Clean up the buffer entry — values are now owned by the
+        // dispatch path.
+        sidecarBuffer.delete(seq);
+      }
     }
 
-    // Empty batch: nothing to wait for.
-    if (expectedTotal === 0) {
-      resolveDone();
+    if (!skipDispatch) {
+      // Pre-allocate every synth id BEFORE dispatching any call.
+      const synthesizedCalls: WireMessage[] = [];
+      for (const call of calls) {
+        const synthId = nextSynthId++;
+        batch.orderedIds.push(synthId);
+        batch.expected.add(synthId);
+        synthesizedCalls.push({
+          type: 'call',
+          id: synthId,
+          method: call.method,
+          params: call.params ?? [],
+        });
+      }
+      const expectedTotal = batch.expected.size;
+
+      // Dispatch.
+      for (const synthesized of synthesizedCalls) {
+        rpcOnMessage?.(synthesized);
+      }
+
+      // Empty batch: nothing to wait for.
+      if (expectedTotal === 0) {
+        resolveDone();
+      }
     }
 
     await done;
