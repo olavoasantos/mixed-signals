@@ -132,6 +132,24 @@ function sendTest(data: unknown): void {
             }
             return;
           }
+          case 'prelude-subscribe-then-read': {
+            // Access a signal on the root to trigger scheduleWatch,
+            // then immediately rpc.wait to test that the prelude
+            // carries the @W and the host applies it before dispatch.
+            const signalProxy = client.root[c.method!];
+            // Access .value to trigger the watch subscription
+            const _triggerWatch = signalProxy.value;
+            // Now call a method that reads the same signal's value
+            const readMethod = (c as {readMethod?: string}).readMethod ?? 'readSignal';
+            const [result] = client.wait([client.root[readMethod](...(c.args ?? []))]);
+            sendTest({
+              type: 'prelude-subscribe-then-read-result',
+              id: c.id,
+              ok: true,
+              value: result,
+            });
+            return;
+          }
           case 'sync-batch-expect-throw': {
             try {
               const promises = c.calls!.map((call) =>
