@@ -3,92 +3,16 @@
  * end-to-end cross-origin Playwright coverage lands in a later milestone.
  */
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import type {
-  RawTransport,
-  TransportContext,
-  WireMessage,
-} from '../../shared/protocol.ts';
+import type {WireMessage} from '../../shared/protocol.ts';
 import {SyncRPCIframeBridgeError} from '../../sync/errors.ts';
 import {_createIframeBrokerBridgeInternal} from '../../sync/iframe-broker.ts';
-
-type AnyHandler = (event: any) => void;
-
-interface FakeWorker {
-  postMessage(data: unknown, transfer?: readonly unknown[]): void;
-  addEventListener(type: string, cb: AnyHandler): void;
-  removeEventListener(type: string, cb: AnyHandler): void;
-  _listeners: AnyHandler[];
-  _listenersByType: Map<string, AnyHandler[]>;
-  _emit(partial: Partial<MessageEvent>): void;
-  _emitEvent(type: string, event?: any): void;
-  _sent: Array<{data: unknown; transfer: readonly unknown[]}>;
-}
-
-function makeFakeWorker(): FakeWorker {
-  const listenersByType = new Map<string, AnyHandler[]>();
-  const getListeners = (type: string) => {
-    let arr = listenersByType.get(type);
-    if (!arr) { arr = []; listenersByType.set(type, arr); }
-    return arr;
-  };
-  const sent: Array<{data: unknown; transfer: readonly unknown[]}> = [];
-  return {
-    postMessage(data, transfer = []) {
-      sent.push({data, transfer});
-    },
-    addEventListener(type: string, cb: AnyHandler) {
-      getListeners(type).push(cb);
-    },
-    removeEventListener(type: string, cb: AnyHandler) {
-      const arr = listenersByType.get(type);
-      if (!arr) return;
-      const idx = arr.indexOf(cb);
-      if (idx >= 0) arr.splice(idx, 1);
-    },
-    _listeners: getListeners('message'),
-    _listenersByType: listenersByType,
-    _emit(partial) {
-      const event = partial as MessageEvent;
-      for (const h of getListeners('message').slice()) h(event);
-    },
-    _emitEvent(type: string, event?: any) {
-      for (const h of getListeners(type).slice()) h(event ?? {});
-    },
-    _sent: sent,
-  };
-}
-
-interface FakeHostTransport extends RawTransport {
-  /** Outbound payloads observed on the host transport. */
-  sent: Array<{data: unknown; ctx?: TransportContext}>;
-  /** Synthetically deliver an inbound message. */
-  inbound(data: unknown, ctx?: TransportContext): void;
-}
-
-function makeFakeHostTransport(): FakeHostTransport {
-  type Cb = (data: unknown, ctx?: TransportContext) => void | Promise<void>;
-  const listeners: Cb[] = [];
-  const sent: Array<{data: unknown; ctx?: TransportContext}> = [];
-  return {
-    mode: 'raw',
-    send(data, ctx) {
-      sent.push({data, ctx});
-    },
-    onMessage(cb) {
-      listeners.push(cb);
-    },
-    sent,
-    inbound(data, ctx) {
-      for (const cb of listeners.slice()) cb(data, ctx);
-    },
-  };
-}
+import {makeFakeWorkerWithSent, makeFakeHostTransport} from './_test-doubles.ts';
 
 describe('createIframeBrokerBridge — construction', () => {
   it('throws SyncRPCIframeBridgeError when crossOriginIsolated is false', () => {
     expect(() =>
       _createIframeBrokerBridgeInternal({
-        worker: makeFakeWorker(),
+        worker: makeFakeWorkerWithSent(),
         hostTransport: makeFakeHostTransport(),
         _crossOriginIsolated: false,
       }),
@@ -98,7 +22,7 @@ describe('createIframeBrokerBridge — construction', () => {
   it('returns an IframeBrokerBridge with dispose, server, client when COI', () => {
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
-      worker: makeFakeWorker(),
+      worker: makeFakeWorkerWithSent(),
       hostTransport: host,
       _crossOriginIsolated: true,
     });
@@ -113,7 +37,7 @@ describe('createIframeBrokerBridge — construction', () => {
 
 describe('createIframeBrokerBridge — handshake (sync)', () => {
   it('processes hs-req from the worker locally and replies via worker.postMessage', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -144,7 +68,7 @@ describe('createIframeBrokerBridge — handshake (sync)', () => {
 
 describe('createIframeBrokerBridge — async pass-through', () => {
   it('forwards normal WireMessages from the worker to the parent', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -167,7 +91,7 @@ describe('createIframeBrokerBridge — async pass-through', () => {
   });
 
   it('forwards normal WireMessages from the parent to the worker', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -199,7 +123,7 @@ describe('createIframeBrokerBridge — heartbeat', () => {
   });
 
   it('fires client_dead upstream after timeoutMs of worker silence following first message', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -232,7 +156,7 @@ describe('createIframeBrokerBridge — heartbeat', () => {
   });
 
   it('does not arm the heartbeat before any worker message arrives', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -256,7 +180,7 @@ describe('createIframeBrokerBridge — heartbeat', () => {
 
 describe('createIframeBrokerBridge — dispose', () => {
   it('detaches the worker message listener', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -271,7 +195,7 @@ describe('createIframeBrokerBridge — dispose', () => {
 
   it('dispose() is idempotent', () => {
     const bridge = _createIframeBrokerBridgeInternal({
-      worker: makeFakeWorker(),
+      worker: makeFakeWorkerWithSent(),
       hostTransport: makeFakeHostTransport(),
       _crossOriginIsolated: true,
     });
@@ -283,7 +207,7 @@ describe('createIframeBrokerBridge — dispose', () => {
   });
 
   it('post-dispose worker messages are not forwarded', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -302,7 +226,7 @@ describe('createIframeBrokerBridge — dispose', () => {
 
 describe('createIframeBrokerBridge — teardown detection', () => {
   function createBrokerWithHandshake(opts?: {clientId?: string}) {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -330,7 +254,7 @@ describe('createIframeBrokerBridge — teardown detection', () => {
   }
 
   it('sends client_dead upstream on worker error event', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -362,7 +286,7 @@ describe('createIframeBrokerBridge — teardown detection', () => {
   });
 
   it('sends client_dead on messageerror event', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -385,7 +309,7 @@ describe('createIframeBrokerBridge — teardown detection', () => {
   });
 
   it('emitDeath is idempotent — second error is a no-op', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,
@@ -412,7 +336,7 @@ describe('createIframeBrokerBridge — teardown detection', () => {
   });
 
   it('dispose removes error and messageerror listeners', () => {
-    const worker = makeFakeWorker();
+    const worker = makeFakeWorkerWithSent();
     const host = makeFakeHostTransport();
     const bridge = _createIframeBrokerBridgeInternal({
       worker,

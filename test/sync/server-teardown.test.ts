@@ -8,11 +8,7 @@
  * Uses the same stub-transport testing approach as enable-server.test.ts.
  */
 import {describe, expect, it, vi} from 'vitest';
-import type {
-  RawTransport,
-  TransportContext,
-  WireMessage,
-} from '../../shared/protocol.ts';
+import type {WireMessage} from '../../shared/protocol.ts';
 import {
   CALLER_STATE,
   CHUNK_STATE,
@@ -24,31 +20,9 @@ import {
 } from '../../sync/lane.ts';
 import {enableSyncServer} from '../../sync/server.ts';
 
+import {createStubTransport} from './_test-doubles.ts';
+
 // ── Helpers ────────────────────────────────────────────────────────────
-
-type Listener = (data: unknown, ctx?: TransportContext) => void | Promise<void>;
-
-function createStubTransport() {
-  const sent: unknown[] = [];
-  let listener: Listener | undefined;
-  const transport: RawTransport = {
-    mode: 'raw',
-    send(data) {
-      sent.push(data);
-    },
-    onMessage(cb) {
-      listener = cb;
-    },
-  };
-  return {
-    transport,
-    sent,
-    /** Simulate inbound message from the caller side */
-    receive(data: unknown) {
-      listener?.(data);
-    },
-  };
-}
 
 function extractHsRes(sent: unknown[]): {
   control: SharedArrayBuffer;

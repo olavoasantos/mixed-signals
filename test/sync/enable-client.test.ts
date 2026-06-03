@@ -14,60 +14,13 @@
  * lives in `enable-client-server.test.ts`.
  */
 import {describe, expect, it, vi} from 'vitest';
-import type {
-  RawTransport,
-  TransportContext,
-} from '../../shared/protocol.ts';
 import {enableSyncClient} from '../../sync/client.ts';
 import {
   SyncRPCIframeBridgeError,
   SyncRPCTimeoutError,
 } from '../../sync/errors.ts';
 import {allocateLane} from '../../sync/lane.ts';
-
-/**
- * Build a paired in-memory raw transport. Both ends share a single
- * queue so we can deliver messages from a test on either side
- * synchronously. The caller (`enableSyncClient`) sees `clientSide`;
- * the test plays the host role through `hostSide`.
- */
-function pairedTransports(): {
-  clientSide: RawTransport;
-  hostSide: RawTransport;
-  /** Inbound payloads observed on the host side, in arrival order. */
-  hostReceived: unknown[];
-} {
-  type Handler = (
-    data: unknown,
-    ctx?: TransportContext,
-  ) => void | Promise<void>;
-  const clientHandlers: Handler[] = [];
-  const hostHandlers: Handler[] = [];
-  const hostReceived: unknown[] = [];
-
-  const clientSide: RawTransport = {
-    mode: 'raw',
-    send(data, ctx) {
-      hostReceived.push(data);
-      for (const h of hostHandlers) h(data, ctx);
-    },
-    onMessage(cb) {
-      clientHandlers.push(cb);
-    },
-  };
-
-  const hostSide: RawTransport = {
-    mode: 'raw',
-    send(data, ctx) {
-      for (const h of clientHandlers) h(data, ctx);
-    },
-    onMessage(cb) {
-      hostHandlers.push(cb);
-    },
-  };
-
-  return {clientSide, hostSide, hostReceived};
-}
+import {pairedTransports} from './_test-doubles.ts';
 
 describe('enableSyncClient handshake', () => {
   it('resolves with a Transport once the host posts hs-res', async () => {
