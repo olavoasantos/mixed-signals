@@ -28,6 +28,14 @@ import type {
   RawTransport,
   TransportContext,
 } from '../../shared/protocol.ts';
+import {
+  makeFakeWindow,
+  makeFakeWorker,
+  makeFakeHostTransport,
+  pairedTransports,
+  type FakeWindow,
+  type FakeWorker,
+} from './_test-doubles.ts';
 import {enableSyncClient} from '../../sync/client.ts';
 import {
   SyncRPCError,
@@ -36,133 +44,6 @@ import {
 import {_createIframeBrokerBridgeInternal} from '../../sync/iframe-broker.ts';
 import {_createIframeRelayBridgeInternal} from '../../sync/iframe-relay.ts';
 import {allocateLane} from '../../sync/lane.ts';
-
-// ── Stubs ────────────────────────────────────────────────────────────────
-
-type AnyHandler = (event: any) => void;
-
-type WindowPostMessageFn = (
-  data: unknown,
-  targetOrigin: string,
-  transfer?: readonly unknown[],
-) => void;
-
-function makeFakeWindow() {
-  const listenersByType = new Map<string, AnyHandler[]>();
-  const getListeners = (type: string) => {
-    let arr = listenersByType.get(type);
-    if (!arr) {
-      arr = [];
-      listenersByType.set(type, arr);
-    }
-    return arr;
-  };
-  return {
-    postMessage: vi.fn<WindowPostMessageFn>(),
-    addEventListener(type: string, cb: AnyHandler) {
-      getListeners(type).push(cb);
-    },
-    removeEventListener(type: string, cb: AnyHandler) {
-      const arr = listenersByType.get(type);
-      if (!arr) return;
-      const idx = arr.indexOf(cb);
-      if (idx >= 0) arr.splice(idx, 1);
-    },
-    _listeners: getListeners('message'),
-    _listenersByType: listenersByType,
-    _emit(partial: Partial<MessageEvent>) {
-      const event = partial as MessageEvent;
-      for (const h of getListeners('message').slice()) h(event);
-    },
-  };
-}
-
-function makeFakeWorker() {
-  const listenersByType = new Map<string, AnyHandler[]>();
-  const getListeners = (type: string) => {
-    let arr = listenersByType.get(type);
-    if (!arr) {
-      arr = [];
-      listenersByType.set(type, arr);
-    }
-    return arr;
-  };
-  return {
-    postMessage: vi.fn(),
-    addEventListener(type: string, cb: AnyHandler) {
-      getListeners(type).push(cb);
-    },
-    removeEventListener(type: string, cb: AnyHandler) {
-      const arr = listenersByType.get(type);
-      if (!arr) return;
-      const idx = arr.indexOf(cb);
-      if (idx >= 0) arr.splice(idx, 1);
-    },
-    _listeners: getListeners('message'),
-    _emit(partial: Partial<MessageEvent>) {
-      const event = partial as MessageEvent;
-      for (const h of getListeners('message').slice()) h(event);
-    },
-  };
-}
-
-function makeFakeHostTransport(): RawTransport & {
-  sent: Array<{data: unknown; ctx?: TransportContext}>;
-  inbound(data: unknown, ctx?: TransportContext): void;
-} {
-  type Cb = (data: unknown, ctx?: TransportContext) => void | Promise<void>;
-  const listeners: Cb[] = [];
-  const sent: Array<{data: unknown; ctx?: TransportContext}> = [];
-  return {
-    mode: 'raw',
-    send(data, ctx) {
-      sent.push({data, ctx});
-    },
-    onMessage(cb) {
-      listeners.push(cb);
-    },
-    sent,
-    inbound(data, ctx) {
-      for (const cb of listeners.slice()) cb(data, ctx);
-    },
-  };
-}
-
-/**
- * Paired in-memory raw transport for handshake tests.
- */
-function pairedTransports() {
-  type Handler = (
-    data: unknown,
-    ctx?: TransportContext,
-  ) => void | Promise<void>;
-  const clientHandlers: Handler[] = [];
-  const hostHandlers: Handler[] = [];
-  const hostReceived: unknown[] = [];
-
-  const clientSide: RawTransport = {
-    mode: 'raw',
-    send(data, ctx) {
-      hostReceived.push(data);
-      for (const h of hostHandlers) h(data, ctx);
-    },
-    onMessage(cb) {
-      clientHandlers.push(cb);
-    },
-  };
-
-  const hostSide: RawTransport = {
-    mode: 'raw',
-    send(data, ctx) {
-      for (const h of clientHandlers) h(data, ctx);
-    },
-    onMessage(cb) {
-      hostHandlers.push(cb);
-    },
-  };
-
-  return {clientSide, hostSide, hostReceived};
-}
 
 /**
  * Helper: catch a synchronous throw and return the error for assertion.

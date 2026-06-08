@@ -16,116 +16,14 @@
  *   - Empty batches throw `RangeError`.
  *   - First-error-wins on N-arity batches with mixed success/failure.
  */
-import {Worker} from 'node:worker_threads';
 import {signal} from '@preact/signals-core';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it} from 'vitest';
 import {RPCClient} from '../../client/rpc.ts';
 import {createRawMemoryTransportPair} from '../../server/memory-transport.ts';
 import {createModel} from '../../server/model.ts';
 import {RPC} from '../../server/rpc.ts';
-import type {
-  RawTransport,
-  TransportContext,
-} from '../../shared/protocol.ts';
 import {SyncRPCNoTransportWaitError} from '../../sync/errors.ts';
-import {enableSyncServer} from '../../sync/server.ts';
-
-const WORKER_URL = new URL('./_rpc-wait-fixture.ts', import.meta.url);
-
-interface Harness {
-  worker: Worker;
-  rpc: RPC;
-  cmd: <T = unknown>(command: {
-    type: string;
-    [k: string]: unknown;
-  }) => Promise<T>;
-  dispose: () => Promise<void>;
-}
-
-function setupHarness(root: object): Harness {
-  const worker = new Worker(WORKER_URL);
-  worker.on('error', (err: Error) => {
-    // eslint-disable-next-line no-console
-    console.error('[worker error]', err);
-  });
-
-  const rpcListeners: Array<
-    (data: unknown, ctx?: TransportContext) => void | Promise<void>
-  > = [];
-  const testListeners: Array<(data: unknown) => void> = [];
-
-  worker.on('message', (envelope: {kind: string; data: unknown}) => {
-    if (envelope?.kind === 'mixed-signals') {
-      for (const listener of rpcListeners) listener(envelope.data);
-    } else if (envelope?.kind === 'test') {
-      for (const listener of testListeners) listener(envelope.data);
-    }
-  });
-
-  const base: RawTransport = {
-    mode: 'raw',
-    send(data, _ctx) {
-      worker.postMessage({kind: 'mixed-signals', data});
-    },
-    onMessage(cb) {
-      rpcListeners.push(cb);
-    },
-  };
-
-  const wrapped = enableSyncServer(base);
-  const rpc = new RPC(root);
-  rpc.addClient(wrapped);
-
-  let nextId = 1;
-  const readyPromise = new Promise<void>((resolve, reject) => {
-    testListeners.push((msg: unknown) => {
-      const m = msg as {type: string; error?: string};
-      if (m.type === 'ready') resolve();
-      if (m.type === 'fatal') {
-        reject(new Error(`worker fatal: ${m.error ?? '(no message)'}`));
-      }
-    });
-  });
-
-  function cmd<T>(command: {
-    type: string;
-    [k: string]: unknown;
-  }): Promise<T> {
-    const id = nextId++;
-    return readyPromise.then(
-      () =>
-        new Promise<T>((resolve, reject) => {
-          const listener = (msg: unknown) => {
-            const m = msg as {
-              type: string;
-              id?: number;
-              ok?: boolean;
-              error?: string;
-            };
-            if (m.id !== id) return;
-            const idx = testListeners.indexOf(listener);
-            if (idx >= 0) testListeners.splice(idx, 1);
-            if (m.ok === false) {
-              reject(new Error(m.error ?? '(no error message)'));
-            } else {
-              resolve(m as T);
-            }
-          };
-          testListeners.push(listener);
-          worker.postMessage({kind: 'test', data: {...command, id}});
-        }),
-    );
-  }
-
-  return {
-    worker,
-    rpc,
-    cmd,
-    dispose: async () => {
-      await worker.terminate();
-    },
-  };
-}
+import {MixedSignalsNodeHarness} from '../harness/index.ts';
 
 describe('RPCClient.canWait', () => {
   it('returns false when the transport does not implement wait?', () => {
@@ -181,54 +79,54 @@ describe('RPCClient.wait — non-sync transports', () => {
 });
 
 describe('RPCClient.wait — end-to-end via Node worker', () => {
-  let h: Harness | undefined;
-
-  beforeEach(() => {
-    h = undefined;
-  });
+  let harness: MixedSignalsNodeHarness | undefined;
 
   afterEach(async () => {
-    if (h) await h.dispose();
-    h = undefined;
+    if (harness) await harness.terminate();
+    harness = undefined;
   });
 
   it('round-trips a primitive return value', async () => {
-    h = setupHarness({
-      add(a: number, b: number) {
-        return a + b;
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        add(a: number, b: number) {
+          return a + b;
+        },
       },
+      sync: true,
     });
+    await harness.ready;
 
-    const result = await h.cmd<{value: number}>({
-      type: 'sync-call',
-      method: 'add',
-      args: [2, 3],
+    const result = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      const [value] = c.wait([c.root.add(2, 3)]);
+      return value;
     });
-    expect(result.value).toBe(5);
+    expect(result).toBe(5);
   });
 
   it('three primitive-returning calls in one rpc.wait round-trip return three correct results in input order', async () => {
-    h = setupHarness({
-      one() {
-        return 1;
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        one() {
+          return 1;
+        },
+        two() {
+          return 'two';
+        },
+        three() {
+          return true;
+        },
       },
-      two() {
-        return 'two';
-      },
-      three() {
-        return true;
-      },
+      sync: true,
     });
+    await harness.ready;
 
-    const result = await h.cmd<{values: unknown[]}>({
-      type: 'sync-batch',
-      calls: [
-        {method: 'one', args: []},
-        {method: 'two', args: []},
-        {method: 'three', args: []},
-      ],
+    const values = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      return c.wait([c.root.one(), c.root.two(), c.root.three()]);
     });
-    expect(result.values).toEqual([1, 'two', true]);
+    expect(values).toEqual([1, 'two', true]);
   });
 
   it('hydrates a handle return value as a proxy (same brand semantics as async path)', async () => {
@@ -236,56 +134,94 @@ describe('RPCClient.wait — end-to-end via Node worker', () => {
       'WaitCounter',
       () => ({value: signal(7)}),
     );
-    h = setupHarness({
-      makeCounter() {
-        return new Counter();
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        makeCounter() {
+          return new Counter();
+        },
       },
+      sync: true,
     });
+    await harness.ready;
 
-    const result = await h.cmd<{typeName: string; valueOfValue: number}>({
-      type: 'sync-call-handle',
-      method: 'makeCounter',
+    const result = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      const [handle] = c.wait([c.root.makeCounter()]);
+      return {
+        typeName: (globalThis as any).typeOfRemote(handle),
+        valueOfValue: handle.value.peek(),
+      };
     });
     expect(result.typeName).toBe('WaitCounter');
     expect(result.valueOfValue).toBe(7);
   });
 
   it('throws SyncRPCAlreadyWaitedError when given an already-awaited promise', async () => {
-    h = setupHarness({
-      ping() {
-        return 'pong';
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        ping() {
+          return 'pong';
+        },
       },
+      sync: true,
     });
+    await harness.ready;
 
-    const result = await h.cmd<{errorName: string}>({
-      type: 'reuse-await-then-wait',
+    const result = await harness.client.evaluate(async () => {
+      const c = (globalThis as any).client;
+      const p = c.root.ping();
+      await p; // consume the promise via await
+      try {
+        c.wait([p]); // try to wait on already-consumed promise
+        return {errorName: ''};
+      } catch (err) {
+        return {errorName: (err as any).name};
+      }
     });
     expect(result.errorName).toBe('SyncRPCAlreadyWaitedError');
   });
 
   it('throws SyncRPCAlreadyWaitedError when given a plain Promise (not a SyncablePromise)', async () => {
-    h = setupHarness({});
-    const result = await h.cmd<{errorName: string}>({type: 'wait-plain-promise'});
+    harness = new MixedSignalsNodeHarness({
+      root: {},
+      sync: true,
+    });
+    await harness.ready;
+
+    const result = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      try {
+        c.wait([Promise.resolve('plain') as any]);
+        return {errorName: ''};
+      } catch (err) {
+        return {errorName: (err as any).name};
+      }
+    });
     expect(result.errorName).toBe('SyncRPCAlreadyWaitedError');
   });
 
   it('first-error-wins on a batch with one failure', async () => {
-    h = setupHarness({
-      ok() {
-        return 'fine';
+    harness = new MixedSignalsNodeHarness({
+      root: {
+        ok() {
+          return 'fine';
+        },
+        bad() {
+          throw new Error('detonated');
+        },
       },
-      bad() {
-        throw new Error('detonated');
-      },
+      sync: true,
     });
+    await harness.ready;
 
-    const result = await h.cmd<{errorMessage: string}>({
-      type: 'sync-batch-expect-throw',
-      calls: [
-        {method: 'ok', args: []},
-        {method: 'bad', args: []},
-        {method: 'ok', args: []},
-      ],
+    const result = await harness.client.evaluate(() => {
+      const c = (globalThis as any).client;
+      try {
+        c.wait([c.root.ok(), c.root.bad(), c.root.ok()]);
+        return {threw: false, errorMessage: ''};
+      } catch (err) {
+        return {threw: true, errorMessage: (err as any).message};
+      }
     });
     expect(result.errorMessage).toBe('detonated');
   });

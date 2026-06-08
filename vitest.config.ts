@@ -7,6 +7,10 @@ export default defineConfig({
       '.ignore/**',
       'build/**',
       'node_modules/**',
+      // Browser harness tests require Playwright browsers to be
+      // installed (`npx playwright install chromium`). Run them
+      // via: pnpm vitest run --config vitest.browser-harness.config.ts
+      'test/harness/browser-*.test.ts',
     ],
     // Disabled in anticipation of future `worker_threads`-based sync
     // tests that spawn workers sharing real SAB lanes. Vitest's default

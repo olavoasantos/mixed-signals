@@ -8,97 +8,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {SyncRPCIframeBridgeError} from '../../sync/errors.ts';
 import {_createIframeRelayBridgeInternal} from '../../sync/iframe-relay.ts';
-
-// ── Stubs ────────────────────────────────────────────────────────────────
-
-type AnyHandler = (event: any) => void;
-
-interface FakeEventTarget {
-  addEventListener(type: string, cb: AnyHandler): void;
-  removeEventListener(type: string, cb: AnyHandler): void;
-  /** Inspect attached message listeners (for leak assertions). */
-  _listeners: AnyHandler[];
-  /** All listeners by type. */
-  _listenersByType: Map<string, AnyHandler[]>;
-  /** Synthetically deliver a message event. */
-  _emit(partial: Partial<MessageEvent>): void;
-  /** Synthetically deliver a typed event. */
-  _emitEvent(type: string, event?: any): void;
-}
-
-type WindowPostMessageFn = (
-  data: unknown,
-  targetOrigin: string,
-  transfer?: readonly unknown[],
-) => void;
-type WorkerPostMessageFn = (
-  data: unknown,
-  transfer?: readonly unknown[],
-) => void;
-
-function makeFakeWindow(): FakeEventTarget & {
-  postMessage: ReturnType<typeof vi.fn<WindowPostMessageFn>>;
-} {
-  const listenersByType = new Map<string, AnyHandler[]>();
-  const getListeners = (type: string) => {
-    let arr = listenersByType.get(type);
-    if (!arr) { arr = []; listenersByType.set(type, arr); }
-    return arr;
-  };
-  return {
-    postMessage: vi.fn<WindowPostMessageFn>(),
-    addEventListener(type: string, cb: AnyHandler) {
-      getListeners(type).push(cb);
-    },
-    removeEventListener(type: string, cb: AnyHandler) {
-      const arr = listenersByType.get(type);
-      if (!arr) return;
-      const idx = arr.indexOf(cb);
-      if (idx >= 0) arr.splice(idx, 1);
-    },
-    _listeners: getListeners('message'),
-    _listenersByType: listenersByType,
-    _emit(partial: Partial<MessageEvent>) {
-      const event = partial as MessageEvent;
-      for (const h of getListeners('message').slice()) h(event);
-    },
-    _emitEvent(type: string, event?: any) {
-      for (const h of getListeners(type).slice()) h(event ?? {});
-    },
-  };
-}
-
-function makeFakeWorker(): FakeEventTarget & {
-  postMessage: ReturnType<typeof vi.fn<WorkerPostMessageFn>>;
-} {
-  const listenersByType = new Map<string, AnyHandler[]>();
-  const getListeners = (type: string) => {
-    let arr = listenersByType.get(type);
-    if (!arr) { arr = []; listenersByType.set(type, arr); }
-    return arr;
-  };
-  return {
-    postMessage: vi.fn<WorkerPostMessageFn>(),
-    addEventListener(type: string, cb: AnyHandler) {
-      getListeners(type).push(cb);
-    },
-    removeEventListener(type: string, cb: AnyHandler) {
-      const arr = listenersByType.get(type);
-      if (!arr) return;
-      const idx = arr.indexOf(cb);
-      if (idx >= 0) arr.splice(idx, 1);
-    },
-    _listeners: getListeners('message'),
-    _listenersByType: listenersByType,
-    _emit(partial: Partial<MessageEvent>) {
-      const event = partial as MessageEvent;
-      for (const h of getListeners('message').slice()) h(event);
-    },
-    _emitEvent(type: string, event?: any) {
-      for (const h of getListeners(type).slice()) h(event ?? {});
-    },
-  };
-}
+import {makeFakeWindow, makeFakeWorker, type FakeWindow, type FakeWorker} from './_test-doubles.ts';
 
 describe('createIframeRelayBridge — construction', () => {
   it('throws SyncRPCIframeBridgeError when parentOrigin is "null"', () => {
@@ -130,9 +40,9 @@ describe('createIframeRelayBridge — construction', () => {
 });
 
 describe('createIframeRelayBridge — forwarding', () => {
-  let parentWindow: ReturnType<typeof makeFakeWindow>;
-  let localWindow: ReturnType<typeof makeFakeWindow>;
-  let worker: ReturnType<typeof makeFakeWorker>;
+  let parentWindow: FakeWindow;
+  let localWindow: FakeWindow;
+  let worker: FakeWorker;
 
   beforeEach(() => {
     parentWindow = makeFakeWindow();
@@ -202,9 +112,9 @@ describe('createIframeRelayBridge — forwarding', () => {
 });
 
 describe('createIframeRelayBridge — heartbeat', () => {
-  let parentWindow: ReturnType<typeof makeFakeWindow>;
-  let localWindow: ReturnType<typeof makeFakeWindow>;
-  let worker: ReturnType<typeof makeFakeWorker>;
+  let parentWindow: FakeWindow;
+  let localWindow: FakeWindow;
+  let worker: FakeWorker;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -443,9 +353,9 @@ describe('createIframeRelayBridge — inspection façades', () => {
 });
 
 describe('createIframeRelayBridge — teardown detection', () => {
-  let parentWindow: ReturnType<typeof makeFakeWindow>;
-  let localWindow: ReturnType<typeof makeFakeWindow>;
-  let worker: ReturnType<typeof makeFakeWorker>;
+  let parentWindow: FakeWindow;
+  let localWindow: FakeWindow;
+  let worker: FakeWorker;
 
   beforeEach(() => {
     parentWindow = makeFakeWindow();

@@ -6,21 +6,10 @@
  * store and the notification envelope.
  */
 import {describe, expect, it, vi} from 'vitest';
-import type {RawTransport, TransportContext} from '../../shared/protocol.ts';
+import type {RawTransport} from '../../shared/protocol.ts';
 import {CALLER_STATE, CONTROL_SAB_BYTES, CTRL} from '../../sync/lane.ts';
 import {markCallerDead} from '../../sync/lifecycle.ts';
-
-function createStubTransport(): RawTransport & {sent: unknown[]} {
-  const sent: unknown[] = [];
-  return {
-    mode: 'raw',
-    sent,
-    send(data: unknown) {
-      sent.push(data);
-    },
-    onMessage() {},
-  };
-}
+import {createStubTransport} from './_test-doubles.ts';
 
 function createControlSab(): SharedArrayBuffer {
   const sab = new SharedArrayBuffer(CONTROL_SAB_BYTES);
@@ -33,7 +22,7 @@ function createControlSab(): SharedArrayBuffer {
 describe('markCallerDead', () => {
   it('writes CALLER_STATE.DEAD to the SAB at the expected offset', () => {
     const controlSab = createControlSab();
-    const transport = createStubTransport();
+    const {transport, sent} = createStubTransport();
 
     markCallerDead({
       controlSab,
@@ -48,7 +37,7 @@ describe('markCallerDead', () => {
 
   it('sends the client_dead envelope with correct shape', () => {
     const controlSab = createControlSab();
-    const transport = createStubTransport();
+    const {transport, sent} = createStubTransport();
 
     markCallerDead({
       controlSab,
@@ -57,8 +46,8 @@ describe('markCallerDead', () => {
       clientId: 'worker-abc',
     });
 
-    expect(transport.sent).toHaveLength(1);
-    expect(transport.sent[0]).toEqual({
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
       __sync: 'client_dead',
       epoch: 42,
       clientId: 'worker-abc',
@@ -92,7 +81,7 @@ describe('markCallerDead', () => {
 
   it('double-call does not throw; SAB stays DEAD; second notification fires', () => {
     const controlSab = createControlSab();
-    const transport = createStubTransport();
+    const {transport, sent} = createStubTransport();
 
     markCallerDead({
       controlSab,
@@ -110,7 +99,7 @@ describe('markCallerDead', () => {
     const view = new Int32Array(controlSab);
     expect(Atomics.load(view, CTRL.CALLER_STATE)).toBe(CALLER_STATE.DEAD);
     // Both notifications fire — the host dedups via epoch.
-    expect(transport.sent).toHaveLength(2);
+    expect(sent).toHaveLength(2);
   });
 
   it('swallows transport.send errors after SAB store succeeds', () => {
