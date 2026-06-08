@@ -1,4 +1,5 @@
 /**
+ * @internal
  * Two-SAB lane layout for sync RPC. Two `SharedArrayBuffer`s per client:
  *
  *   - **Control SAB** (256 bytes, fixed): cache-line-friendly `Int32`

@@ -1,4 +1,5 @@
 /**
+ * @internal
  * Transferable sidecar support for sync RPC.
  *
  * The sync transport uses two channels: the SAB lane carries the JSON wire

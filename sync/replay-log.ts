@@ -1,6 +1,7 @@
 import type {WireMessage} from '../shared/protocol.ts';
 
 /**
+ * @internal
  * Result of a `framesAfter` query. Contains the frames and a flag
  * indicating whether any frames were lost due to hard-cap eviction
  * before the requested starting seq.
