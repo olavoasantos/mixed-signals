@@ -3,3 +3,4 @@ build/
 .typedoc/
 *.tsbuildinfo
 .ignore
+bench/sync/baseline.json
