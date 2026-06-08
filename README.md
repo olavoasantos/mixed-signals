@@ -279,6 +279,68 @@ On raw transports, structured clone handles most built-ins natively, so
 codec registration is optional. Register only when you have types
 structured clone doesn't know (custom classes) or want explicit control.
 
+## Synchronous mode (`rpc.wait`)
+
+The `mixed-signals/sync` sub-bundle lets a **worker** block on one or more
+in-flight RPC promises and receive results synchronously — via
+`SharedArrayBuffer` + `Atomics.wait`, in a single round-trip:
+
+```ts
+// worker.ts (DedicatedWorker, SharedWorker, or Node worker thread)
+import { RPCClient } from 'mixed-signals/client';
+import { enableSyncClient } from 'mixed-signals/sync';
+
+const syncTransport = await enableSyncClient(rawTransport);
+const rpc = new RPCClient(syncTransport);
+
+// One call, synchronous:
+const [text] = rpc.wait([rpc.root.getProperty(123, 'innerText')]);
+
+// N-arity — one round-trip, three calls:
+const [products, customer, locale] = rpc.wait([
+  rpc.root.commerce.fetchProducts(),
+  rpc.root.commerce.currentCustomer(),
+  rpc.root.i18n.locale(),
+]);
+```
+
+Async remains the default — every proxy method still returns a `Promise`.
+`rpc.wait` is opt-in per-call, not per-client.
+
+### Topologies
+
+| Topology | Helper | When to use |
+| --- | --- | --- |
+| Worker ↔ main | `enableSyncServer` / `enableSyncClient` | Direct `postMessage` channel (Node `worker_threads`, browser `DedicatedWorker`) |
+| Same-origin iframe relay | `createIframeRelayBridge` | Parent and iframe share an origin; SABs travel through the relay |
+| Cross-origin iframe broker | `createIframeBrokerBridge` | Parent and iframe at different origins (e.g. host app + CDN-served extension iframe) |
+
+### Hard rules
+
+- **Worker-only callers.** Main thread and ServiceWorker throw at
+  `rpc.wait()` time.
+- **Cross-origin isolation required.** COOP `same-origin` + COEP
+  `require-corp` on every context in the chain. No silent fallback.
+- **Leaf-only topology.** Only the client worker blocks; brokers
+  compose downward.
+
+### Performance
+
+| Path | Latency |
+| --- | --- |
+| `rpc.wait([p])` — single primitive | 3–5 µs |
+| `rpc.wait([p1, p2, p3])` — three primitives (amortized) | ~1.1 µs/call |
+| `rpc.wait([p])` — first-emission object | 15–20 µs |
+| Cross-origin iframe broker (full chain) | ~100–200 µs |
+| Async baseline (microtask-contested) | ~2–10 ms |
+
+In contested environments (heavy React, busy main thread) the sync
+path is **200–1000×** faster because `Atomics.notify` preempts the
+event loop.
+
+→ Full guide: [`docs/sync-mode.md`](docs/sync-mode.md) · Architecture
+internals: [`ARCHITECTURE.md`](ARCHITECTURE.md#synchronous-mode)
+
 ## API
 
 _Generated from TypeScript declarations._
