@@ -510,3 +510,54 @@ Two bundles (`./server`, `./client`). One peer dep:
 - **No push without watch** - a server Signal with zero watchers has zero
   `.subscribe(...)` callbacks attached.
 - **Transport-agnostic** - `Transport = { send(str), onMessage(cb), ready? }`.
+
+---
+
+## Synchronous mode
+
+Optional sub-bundle that lets a worker-hosted client block on
+`rpc.wait()` instead of yielding to an `await`. The async transport
+stays primary; sync mode adds a SharedArrayBuffer fast-path alongside it.
+
+### Two-SAB lane
+
+| SAB | Size | Purpose |
+| --- | ---- | ------- |
+| **Control** | 256 B header | Cache-line-friendly `Int32` header: lane state, request/response sequence numbers, chunking state, lifecycle flags. |
+| **Data** | 64–256 KiB (configurable) | Reusable payload buffer. Holds the request envelope inbound, response envelope outbound. A per-call header (`TYPE`, `LEN`, `INLINE_VAL`) bypasses `JSON.parse` for primitives and known handles. |
+
+### Six-state chunk-state machine
+
+Payloads larger than the data SAB stream in chunks:
+
+```
+Done(0) → MoreReq(1) → AckReq(2)          request direction
+MoreRes(3) → AckRes(4) → DoneRes(5)        response direction
+```
+
+`DoneRes` is distinct from `Done` so the caller's `Atomics.wait` wakes
+reliably on single-chunk responses.
+
+### Replay log
+
+Per-client bounded ring of recent server→client frames. When a
+`rpc.wait` request carries a `clientAppliedSeq` behind the host's
+`serverOutSeq`, the host replays the gap into the response timeline.
+This handles microtask-exhausted async delivery — frames stuck in the
+worker's `postMessage` queue are re-delivered via SAB so the worker
+sees fresh state.
+
+### Four anchor-point modifications
+
+The sync sub-bundle touches four existing files:
+
+| # | File | Change |
+|---|------|--------|
+| 1 | `shared/protocol.ts` | Adds the optional `wait?` method to `BaseTransport` |
+| 2 | `shared/hydrate.ts` | Method-stub trap returns `SyncablePromise` instead of plain `Promise` |
+| 3 | `client/rpc.ts` | Adds `wait()` and `canWait()` methods to `RPCClient` |
+| 4 | `client/reflection.ts` | Adds `flushForSyncPrelude()` to drain pending `@W`/`@U`/`@D` batches into the wait envelope |
+
+### Cross-reference
+
+See `docs/sync-mode.md` for user-level recipes and setup guides.

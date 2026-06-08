@@ -1,0 +1,12 @@
+{
+  "name": "sync-iframe-extension-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs"
+  },
+  "dependencies": {
+    "mixed-signals": "workspace:*",
+    "@preact/signals-core": ">=1.14.0"
+  }
+}

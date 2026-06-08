@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sync RPC — Iframe (broker) — localhost:3001</title>
+  <!--
+    Import map: the iframe needs mixed-signals/sync for the broker bridge
+    and the adapter helpers. @preact/signals-core is a transitive dep
+    pulled in by the shared chunks.
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "mixed-signals/sync":   "/build/sync.js",
+        "@preact/signals-core": "/vendor/signals-core.mjs"
+      }
+    }
+  </script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; background: #fafafa; }
+    h2 { font-size: 1.2rem; margin-top: 0; }
+    .origin { color: #666; font-weight: normal; font-size: 0.85em; }
+    pre { background: #fff; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; line-height: 1.4; max-height: 180px; overflow-y: auto; }
+    .status { padding: 0.4rem 0.8rem; border-radius: 4px; margin: 0.5rem 0; font-size: 0.9rem; }
+    .status.ok { background: #d4edda; color: #155724; }
+    .status.error { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <h2>📦 Iframe (broker) <span class="origin">localhost:3001</span></h2>
+
+  <div id="coi-status"></div>
+  <pre id="log">Waiting for parent to send MessagePort…
+</pre>
+
+  <script type="module">
+    import {
+      createIframeBrokerBridge,
+      wrapMessagePort,
+    } from 'mixed-signals/sync';
+
+    const log = document.getElementById('log');
+    const coiStatus = document.getElementById('coi-status');
+
+    function appendLog(msg) {
+      log.textContent += msg + '\n';
+      log.scrollTop = log.scrollHeight;
+    }
+
+    // ── COI check ─────────────────────────────────────────────────
+    if (crossOriginIsolated) {
+      coiStatus.className = 'status ok';
+      coiStatus.textContent = '✅ crossOriginIsolated = true';
+    } else {
+      coiStatus.className = 'status error';
+      coiStatus.textContent = '❌ crossOriginIsolated = false — broker bridge will throw!';
+      appendLog('[broker] ERROR: not crossOriginIsolated. Check COOP/COEP headers on BOTH origins.');
+    }
+
+    // ── Receive MessagePort from parent ───────────────────────────
+    //
+    // The parent (localhost:3000) creates a MessageChannel and sends
+    // port2 to us. We wrap it as a hostTransport and create the
+    // broker bridge, which owns the SAB ↔ worker sync channel.
+
+    let bridgeCreated = false;
+
+    window.addEventListener('message', (event) => {
+      // Only accept the init message from the parent origin
+      if (event.origin !== 'http://localhost:3000') return;
+      if (event.data?.type !== 'init' || !event.data.port) return;
+      if (bridgeCreated) return; // idempotent
+
+      bridgeCreated = true;
+      appendLog('[broker] received MessagePort from parent');
+
+      // Wrap the tunneled port as a RawTransport
+      const hostTransport = wrapMessagePort({ port: event.data.port });
+      appendLog('[broker] hostTransport created via wrapMessagePort');
+
+      // Spawn the extension worker (same origin as this iframe)
+      const worker = new Worker('/worker.mjs', { type: 'module' });
+      appendLog('[broker] worker spawned');
+
+      // Forward worker logs to our display
+      worker.addEventListener('message', (e) => {
+        if (e.data?.__workerLog) {
+          appendLog(e.data.__workerLog);
+        }
+      });
+
+      try {
+        // Create the active broker bridge.
+        //
+        // This allocates a SharedArrayBuffer pair inside this iframe's
+        // agent cluster and transfers them to the same-origin worker at
+        // handshake time. The host ↔ iframe leg stays async (MessagePort).
+        // The SAB never crosses the cross-origin boundary.
+        const bridge = createIframeBrokerBridge({
+          worker,
+          hostTransport,
+        });
+
+        appendLog('[broker] bridge created — sync channel active');
+
+        // Cleanup on unload
+        window.addEventListener('unload', () => bridge.dispose());
+      } catch (err) {
+        appendLog(`[broker] bridge creation failed: ${err.message}`);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,4 +1,5 @@
 /**
+ * @internal
  * Lifecycle-owner protocol module for worker teardown.
  *
  * Centralizes the two-step death notification used by every spawner

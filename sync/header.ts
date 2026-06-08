@@ -21,7 +21,7 @@
 
 import {WIRE_TYPE} from './lane.ts';
 
-/** Fixed header size in bytes: Int32 (4) + Int32 (4) + Float64 (8) = 16. */
+/** @internal Fixed header size in bytes: Int32 (4) + Int32 (4) + Float64 (8) = 16. */
 export const HEADER_SIZE = 16;
 
 export {WIRE_TYPE};

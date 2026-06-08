@@ -36,6 +36,24 @@ importers:
         specifier: ^4.0.0
         version: 4.1.0(@types/node@25.9.1)(vite@8.0.0(@types/node@25.9.1)(yaml@2.8.2))
 
+  examples/sync-iframe-extension:
+    dependencies:
+      '@preact/signals-core':
+        specifier: '>=1.14.0'
+        version: 1.14.0
+      mixed-signals:
+        specifier: workspace:*
+        version: link:../..
+
+  examples/sync-worker:
+    dependencies:
+      '@preact/signals-core':
+        specifier: '>=1.14.0'
+        version: 1.14.0
+      mixed-signals:
+        specifier: workspace:*
+        version: link:../..
+
 packages:
 
   '@babel/generator@8.0.0-rc.2':
