@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sync RPC — Parent (host) — localhost:3000</title>
+  <!--
+    Import map: maps bare specifiers to the built mixed-signals files
+    and @preact/signals-core so we can use ES module imports without
+    a bundler. The /build/ and /vendor/ paths are served by server.mjs.
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "mixed-signals/server": "/build/server.js",
+        "mixed-signals/sync":   "/build/sync.js",
+        "@preact/signals-core": "/vendor/signals-core.mjs"
+      }
+    }
+  </script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; }
+    h1 { font-size: 1.5rem; }
+    .origin { color: #666; font-weight: normal; font-size: 0.85em; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.9rem; line-height: 1.5; }
+    .status { padding: 0.5rem 1rem; border-radius: 4px; margin: 1rem 0; }
+    .status.ok { background: #d4edda; color: #155724; }
+    .status.error { background: #f8d7da; color: #721c24; }
+    iframe { border: 2px solid #ccc; border-radius: 6px; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>🏠 Parent (host) <span class="origin">localhost:3000</span></h1>
+
+  <div id="coi-status"></div>
+  <pre id="log">Initializing…
+</pre>
+
+  <h2>Extension iframe ↓</h2>
+  <iframe
+    id="ext-iframe"
+    src="http://localhost:3001/iframe.html"
+    width="780"
+    height="300"
+    allow="cross-origin-isolated"
+  ></iframe>
+
+  <script type="module">
+    import { RPC, createModel } from 'mixed-signals/server';
+    import { signal } from '@preact/signals-core';
+
+    const log = document.getElementById('log');
+    const coiStatus = document.getElementById('coi-status');
+
+    function appendLog(msg) {
+      log.textContent += msg + '\n';
+      log.scrollTop = log.scrollHeight;
+    }
+
+    // ── COI check ─────────────────────────────────────────────────
+    if (crossOriginIsolated) {
+      coiStatus.className = 'status ok';
+      coiStatus.textContent = '✅ crossOriginIsolated = true — SharedArrayBuffer available';
+    } else {
+      coiStatus.className = 'status error';
+      coiStatus.textContent = '❌ crossOriginIsolated = false — sync RPC will NOT work. Check COOP/COEP headers.';
+    }
+
+    // ── Root state (the "server" model) ───────────────────────────
+    //
+    // This is the reactive model the worker will interact with via
+    // sync RPC. It has signals (observable state) and methods
+    // (callable from the worker).
+
+    const Counter = createModel('Counter', (initial = 0) => {
+      const count = signal(initial);
+      const label = signal('clicks');
+
+      return {
+        count,
+        label,
+        increment() {
+          count.value++;
+          appendLog(`[host] increment() → count = ${count.value}`);
+          return count.value;
+        },
+        decrement() {
+          count.value--;
+          appendLog(`[host] decrement() → count = ${count.value}`);
+          return count.value;
+        },
+        reset() {
+          count.value = 0;
+          appendLog(`[host] reset() → count = 0`);
+          return 0;
+        },
+        getSnapshot() {
+          const snap = { count: count.value, label: label.value };
+          appendLog(`[host] getSnapshot() → ${JSON.stringify(snap)}`);
+          return snap;
+        },
+        greet(name) {
+          const msg = `Hello, ${name}! Count is ${count.value}.`;
+          appendLog(`[host] greet("${name}") → "${msg}"`);
+          return msg;
+        },
+      };
+    });
+
+    const root = new Counter(0);
+
+    // ── RPC server ────────────────────────────────────────────────
+    const rpc = new RPC(root);
+    appendLog('[host] RPC server created with Counter model');
+
+    // ── Iframe wiring (tunneled MessagePort) ──────────────────────
+    //
+    // We create a MessageChannel, transfer port2 to the iframe, and
+    // use port1 as our raw transport to the iframe's broker bridge.
+    // This is the "tunneled MessagePort" variant (design §6.5).
+
+    const iframe = document.getElementById('ext-iframe');
+
+    iframe.addEventListener('load', () => {
+      appendLog('[host] iframe loaded — sending MessagePort…');
+
+      const channel = new MessageChannel();
+
+      // Transfer port2 to the iframe (different origin)
+      iframe.contentWindow.postMessage(
+        { type: 'init', port: channel.port2 },
+        'http://localhost:3001',
+        [channel.port2],
+      );
+
+      // Use port1 as a raw transport on our side
+      const port = channel.port1;
+      const rawTransport = {
+        mode: 'raw',
+        send(data) { port.postMessage(data); },
+        onMessage(cb) {
+          port.addEventListener('message', (e) => cb(e.data));
+          port.start();
+        },
+      };
+
+      // Add as an async client — the iframe broker owns the sync
+      // layer. From the parent's perspective, this is plain async RPC.
+      const removeClient = rpc.addClient(rawTransport, 'ext-worker-1');
+      appendLog('[host] RPC client "ext-worker-1" registered');
+    });
+  </script>
+</body>
+</html>

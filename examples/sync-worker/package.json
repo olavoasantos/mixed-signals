@@ -1,0 +1,13 @@
+{
+  "name": "sync-worker-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node main.mjs",
+    "build": "echo 'No build step needed — runs directly via Node worker_threads'"
+  },
+  "dependencies": {
+    "mixed-signals": "workspace:*",
+    "@preact/signals-core": ">=1.14.0"
+  }
+}
