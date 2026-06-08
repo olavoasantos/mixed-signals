@@ -10,6 +10,7 @@ import { enableSyncClient } from 'mixed-signals/sync';
 
 const syncTransport = await enableSyncClient(rawTransport);
 const rpc = new RPCClient(syncTransport);
+await rpc.ready;
 
 // Synchronous! Blocks until the host responds.
 const [user] = rpc.wait([rpc.root.getUser(42)]);
@@ -79,7 +80,7 @@ Every topology follows the same pattern:
 ```ts
 import { Worker } from 'node:worker_threads';
 import { RPC } from 'mixed-signals/server';
-import { enableSyncServer } from 'mixed-signals/sync';
+import { enableSyncServer, createNodeWorkerBridge } from 'mixed-signals/sync';
 
 const worker = new Worker('./worker.js');
 const rawTransport = {
@@ -88,9 +89,18 @@ const rawTransport = {
   onMessage: (cb: (data: unknown) => void) => worker.on('message', cb),
 };
 
-const syncTransport = enableSyncServer(rawTransport);
+const syncTransport = enableSyncServer(rawTransport, {
+  clientId: 'worker-1',
+  onClientDead: (id) => rpc.removeClient(id),
+});
 const rpc = new RPC(root);        // `root` is your API object
-rpc.addClient(syncTransport);
+rpc.addClient(syncTransport, 'worker-1');
+
+// Detect worker death (exit, crash, or unresponsive heartbeat)
+const bridge = createNodeWorkerBridge({
+  worker,
+  onDeath: () => syncTransport.markDead('worker-1'),
+});
 ```
 
 **worker.ts** (worker thread):
@@ -108,6 +118,7 @@ const rawTransport = {
 
 const syncTransport = await enableSyncClient(rawTransport);
 const rpc = new RPCClient(syncTransport);
+await rpc.ready;
 
 if (rpc.canWait()) {
   const [result] = rpc.wait([rpc.root.someMethod()]);
@@ -152,6 +163,8 @@ const rawTransport = {
 
 const syncTransport = await enableSyncClient(rawTransport);
 const rpc = new RPCClient(syncTransport);
+await rpc.ready;
+
 const [value] = rpc.wait([rpc.root.getValue()]);
 ```
 
@@ -370,6 +383,8 @@ or sidecar transfer failures.
 `mixed-signals/sync`. If the error mentions a sidecar transfer failure,
 verify the transferable hasn't been detached.
 
+### Cross-origin isolation errors
+
 #### `SyncRPCNotCrossOriginIsolatedError`
 
 **Trigger:** `crossOriginIsolated === false` — `SharedArrayBuffer` is
@@ -524,6 +539,11 @@ instead of the `ArrayBuffer`), or return a handle and retrieve the value
 via a subsequent async call.
 
 Response-side transferable transfer is planned for a future milestone.
+
+### Argument validation
+
+`rpc.wait([])` with an empty array throws a standard `RangeError` (not a
+`SyncRPCError`). This is a programmer error caught before any wire I/O.
 
 ---
 

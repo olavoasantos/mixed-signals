@@ -13,8 +13,8 @@ before the blocking thread resumes.
 **Hard requirement:** every context in the chain must be served with
 cross-origin isolation headers (`Cross-Origin-Opener-Policy: same-origin`
 and `Cross-Origin-Embedder-Policy: require-corp`). Without these headers
-`SharedArrayBuffer` is unavailable and the import will throw at setup
-time.
+`SharedArrayBuffer` is unavailable and sync setup / `rpc.wait()` calls
+fail with typed errors.
 
 `rpc.wait()` is restricted to Worker callers. Invoking it on the main
 thread or inside a ServiceWorker throws immediately — blocking either
@@ -30,7 +30,8 @@ Three topologies are supported out of the box:
   (parent ↔ iframe) and sync (iframe ↔ worker) channels.
 
 See `docs/sync-mode.md` for the full integration guide and `examples/`
-for runnable demos covering each topology.
+for runnable demos covering the worker↔main and cross-origin broker
+topologies.
 
 This is a **minor** version bump: new entry point only, no breaking
 changes to existing `mixed-signals` exports.

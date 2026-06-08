@@ -292,6 +292,7 @@ import { enableSyncClient } from 'mixed-signals/sync';
 
 const syncTransport = await enableSyncClient(rawTransport);
 const rpc = new RPCClient(syncTransport);
+await rpc.ready;
 
 // One call, synchronous:
 const [text] = rpc.wait([rpc.root.getProperty(123, 'innerText')]);
@@ -324,9 +325,9 @@ Async remains the default — every proxy method still returns a `Promise`.
 - **Leaf-only topology.** Only the client worker blocks; brokers
   compose downward.
 
-### Performance
+### Performance (design targets)
 
-| Path | Latency |
+| Path | Target latency |
 | --- | --- |
 | `rpc.wait([p])` — single primitive | 3–5 µs |
 | `rpc.wait([p1, p2, p3])` — three primitives (amortized) | ~1.1 µs/call |

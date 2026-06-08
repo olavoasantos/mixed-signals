@@ -21,6 +21,7 @@ Node `worker_threads` and `mixed-signals/sync`.
 ```bash
 # from the repo root
 pnpm install
+pnpm build          # builds the library — examples import from build/
 cd examples/sync-worker
 pnpm dev
 ```
@@ -28,6 +29,7 @@ pnpm dev
 Or from the repo root:
 
 ```bash
+pnpm build
 node examples/sync-worker/main.mjs
 ```
 
@@ -44,8 +46,14 @@ node examples/sync-worker/main.mjs
 [host] incrementing count from host side → 1
 [worker] 3 — count after host mutation (sync): 2
 [worker] demo complete ✓
+[host] worker exited — cleaning up
+[host] client worker-1 released
 [host] worker exited (code 0)
 ```
+
+The death-detection callbacks fire on normal exits too — that's
+expected. In production you'd gate cleanup on whether the exit
+was intentional.
 
 ## Files
 

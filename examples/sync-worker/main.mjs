@@ -73,7 +73,7 @@ const rawTransport = {
 const syncTransport = enableSyncServer(rawTransport, {
   clientId: CLIENT_ID,
   onClientDead(id) {
-    console.log(`[host] client ${id} died — removing`);
+    console.log(`[host] client ${id} released`);
     rpc.removeClient(id);
   },
 });
@@ -88,7 +88,7 @@ const disposeClient = rpc.addClient(syncTransport, CLIENT_ID);
 const bridge = createNodeWorkerBridge({
   worker,
   onDeath() {
-    console.log("[host] worker died — cleaning up");
+    console.log("[host] worker exited — cleaning up");
     syncTransport.markDead(CLIENT_ID);
     disposeClient();
     bridge.dispose();
